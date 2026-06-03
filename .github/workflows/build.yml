@@ -1,0 +1,81 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  # Figure out which services changed so we only rebuild those (a change under
+  # libs/ rebuilds everything that depends on the shared lib).
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      gitlab-notify: ${{ steps.filter.outputs.gitlab-notify }}
+      gitlab-expand-tasks: ${{ steps.filter.outputs.gitlab-expand-tasks }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            gitlab-notify:
+              - 'services/gitlab-notify/**'
+              - 'libs/**'
+            gitlab-expand-tasks:
+              - 'services/gitlab-expand-tasks/**'
+              - 'libs/**'
+
+  build:
+    needs: changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write              # push to GHCR with the built-in GITHUB_TOKEN
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [gitlab-notify, gitlab-expand-tasks]
+    steps:
+      # Build when the service changed, or always on a version tag.
+      - name: Decide whether to build
+        id: go
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ] || [ "${{ needs.changes.outputs[matrix.service] }}" = "true" ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.go.outputs.build == 'true'
+
+      - name: Log in to GHCR
+        if: steps.go.outputs.build == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image metadata
+        if: steps.go.outputs.build == 'true'
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/${{ matrix.service }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=short
+            type=ref,event=tag
+
+      - name: Build & push
+        if: steps.go.outputs.build == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .                                       # repo root: shared libs/ are in scope
+          file: services/${{ matrix.service }}/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

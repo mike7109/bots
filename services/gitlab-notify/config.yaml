@@ -1,0 +1,39 @@
+# gitlab-notify — what to send, to whom, where. Edit this (and templates/)
+# without rebuilding the image: it's mounted as a volume in docker-compose.
+#
+# Secrets are NOT here — homeserver/token/webhook secret come from env (.env).
+
+# Fallback channel + room used by any rule that doesn't override them.
+defaults:
+  channels: [matrix]
+  matrix:
+    room: "!hnt04WMG..."          # <-- the "🔔 GitLab — infra" room id (no :fakspro.ru)
+
+# GitLab login -> Matrix mxid / display name / email. Used for live @-pings and
+# (later) email recipients. matrix_domain is the fallback when `matrix:` is absent.
+matrix_domain: fakspro.ru
+users:
+  m.bahmutskij: { matrix: "@m.bahmutskij:fakspro.ru", name: "Михаил Бахмутский" }
+  d.nikulin:    { matrix: "@d.nikulin:fakspro.ru",    name: "Никулин Денис" }
+  y.belevitnev: { matrix: "@y.belevitnev:fakspro.ru", name: "Ярослав" }
+  e.schnaider:  { matrix: "@e.schnaider:fakspro.ru",  name: "Елена" }
+  s.staritsyn:  { matrix: "@s.staritsyn:fakspro.ru",  name: "Старицин Сергей" }
+  d.tronin:     { matrix: "@d.tronin:fakspro.ru",     name: "Тронин Дмитрий" }
+
+# Event kind -> template + behaviour. First matching rule wins.
+# NB: the key is `event:` (not `on:`) — YAML reads a bare `on` as boolean True.
+rules:
+  - event: issue                   # webhook: issue opened/closed/reopened
+    actions: [open, close, reopen]
+    template: issue
+    mention: assignee
+
+  - event: task                    # cron-sourced (GitLab 17.6 doesn't webhook tasks)
+    actions: [open, close, reopen]
+    template: issue
+    mention: assignee
+
+  - event: due_soon                # cron: due date is tomorrow
+    template: due_soon
+    mention: assignee
+    # channels: [matrix, email]    # <-- enable email later, one line, no code change

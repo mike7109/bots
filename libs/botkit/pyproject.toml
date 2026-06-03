@@ -1,0 +1,15 @@
+[project]
+name = "botkit"
+version = "0.1.0"
+description = "Shared toolkit for bots: Matrix/GitLab clients, identity mapping, notification engine"
+requires-python = ">=3.12"
+dependencies = [
+    "requests>=2.32",
+    "PyYAML>=6.0",
+    "Jinja2>=3.1",
+    "MarkupSafe>=2.1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

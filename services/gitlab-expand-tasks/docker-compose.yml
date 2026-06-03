@@ -1,0 +1,16 @@
+# Standalone run for this one bot (the full stack lives in /deploy).
+# Port bound to 127.0.0.1 only. GitLab webhook URL: http://127.0.0.1:8080/webhook
+services:
+  expand-tasks:
+    image: ${IMAGE:-ghcr.io/mike7109/gitlab-expand-tasks:latest}
+    container_name: gitlab-expand-tasks
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "127.0.0.1:8080:8080"
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/healthz').status==200 else 1)"]
+      interval: 30s
+      timeout: 3s
+      retries: 3

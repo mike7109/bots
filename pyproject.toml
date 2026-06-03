@@ -1,0 +1,16 @@
+[project]
+name = "bots"
+version = "0.0.0"
+description = "Monorepo for webhook bots and automations (shared botkit lib + per-bot services)"
+requires-python = ">=3.12"
+
+# Virtual workspace root: this package ships nothing itself, it just ties the
+# members together so services can depend on `botkit` without publishing it.
+[tool.uv.workspace]
+members = ["libs/*", "services/*"]
+
+[tool.uv.sources]
+botkit = { workspace = true }
+
+[dependency-groups]
+dev = ["ruff>=0.6"]

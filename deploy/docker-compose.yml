@@ -1,0 +1,31 @@
+# Full stack — runs on the GitLab server. Pulls prebuilt images from GHCR.
+#
+#   cp gitlab-notify.env.example       gitlab-notify.env        # fill in
+#   cp gitlab-expand-tasks.env.example gitlab-expand-tasks.env  # fill in
+#   docker compose pull && docker compose up -d
+#
+# Every service binds 127.0.0.1 only. Point each GitLab webhook at the matching
+# localhost port. Config/templates for gitlab-notify are mounted from the repo
+# so wording/routing changes are just `docker compose restart gitlab-notify`.
+services:
+  gitlab-notify:
+    image: ghcr.io/mike7109/gitlab-notify:latest
+    container_name: gitlab-notify
+    restart: unless-stopped
+    env_file: ./gitlab-notify.env
+    ports:
+      - "127.0.0.1:8081:8080"
+    volumes:
+      - ../services/gitlab-notify/config.yaml:/app/svc/config.yaml:ro
+      - ../services/gitlab-notify/templates:/app/svc/templates:ro
+
+  gitlab-expand-tasks:
+    image: ghcr.io/mike7109/gitlab-expand-tasks:latest
+    container_name: gitlab-expand-tasks
+    restart: unless-stopped
+    env_file: ./gitlab-expand-tasks.env
+    ports:
+      - "127.0.0.1:8080:8080"
+
+# Due-date reminders: run gitlab-notify's cron.py once a day from host cron, e.g.
+#   0 9 * * *  cd /opt/bots/deploy && docker compose run --rm gitlab-notify python cron.py

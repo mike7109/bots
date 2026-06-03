@@ -1,0 +1,15 @@
+[project]
+name = "gitlab-expand-tasks"
+version = "0.1.0"
+description = "GitLab webhook bot: expand child Tasks of an issue into Issues"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+    "requests>=2.32",
+]
+
+# Deployable app, not a library. NOTE: still uses its own helpers rather than
+# botkit — a later cleanup can move its Matrix/GitLab calls onto botkit.
+[tool.uv]
+package = false
