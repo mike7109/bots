@@ -1,2 +1,2 @@
-{{ labels_html(labels) }} {{ mention(assignee) }}<br>
+{% if labels or assignee %}{{ labels_html(labels) }} {{ mention(assignee) }}<br>{% endif %}
 <a href="{{ url }}">#{{ iid }} ({{ state }})</a> {{ title }} — истекает завтра {{ due }}
