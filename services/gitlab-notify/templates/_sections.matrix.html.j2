@@ -1,0 +1,13 @@
+{# Shared digest body: a list of sections {emoji, title, items, show_who?}.
+   Each item is {iid, title, url, due?, assignees?, idle?}. Imported by the
+   digest_*/triage/stale templates so they share one look. #}
+{% macro render(sections) %}
+{% for s in sections %}
+{{ s.emoji }} <b>{{ s.title }}</b>
+<ul>
+{% for it in s["items"] %}
+<li><a href="{{ it.url }}">#{{ it.iid }}</a> {{ it.title | truncate(70, true, '…', 0) }}{% if it.due %} — <i>{{ it.due | ru_date }}</i>{% endif %}{% if s.show_who %}{{ who(it.assignees) }}{% endif %}{% if it.idle is defined and it.idle is not none %} · <i>{{ it.idle }} дн. тишины</i>{% endif %}</li>
+{% endfor %}
+</ul>
+{% endfor %}
+{% endmacro %}

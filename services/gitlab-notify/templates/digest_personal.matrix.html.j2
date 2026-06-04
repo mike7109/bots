@@ -1,0 +1,3 @@
+{% import "_sections.matrix.html.j2" as s %}
+📋 <b>Что на тебе</b> · {{ extra.date | ru_date }} · всего {{ extra.total }}<br>
+{{ s.render(extra.sections) }}

@@ -1,0 +1,8 @@
+📊 <b>Метрики потока</b> · за {{ extra.window }} дн.<br>
+<ul>
+<li>✅ Закрыто: <b>{{ extra.throughput }}</b></li>
+<li>🚧 В работе (WIP): <b>{{ extra.wip }}</b></li>
+<li>📂 Открыто всего: <b>{{ extra.open_total }}</b></li>
+<li>⏳ Медианный возраст открытых: <b>{% if extra.age_med is not none %}{{ extra.age_med }} дн.{% else %}—{% endif %}</b></li>
+<li>🔄 Cycle time p85: <b>{% if extra.cycle_p85 is not none %}{{ extra.cycle_p85 }} дн.{% else %}—{% endif %}</b></li>
+</ul>

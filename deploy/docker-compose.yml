@@ -31,6 +31,10 @@ services:
 volumes:
   gitlab-notify-state:                       # persists the cron dedup ledger across runs
 
-# Due-date reminders: run gitlab-notify's cron.py once a day from host cron, e.g.
-#   0 9 * * *  cd /opt/bots/deploy && docker compose run --rm gitlab-notify python cron.py
-# (`run --rm` reuses the same named volume, so overdue dedup survives between runs.)
+# Reminders & digests: run gitlab-notify's cron.py from host cron. `cron.py` with
+# no arg runs the daily set (due/overdue/digest/team/triage/stale); metrics is
+# weekly. Everything dedups via the state volume, so a re-run the same day is a
+# no-op. Examples:
+#   0 9 * * 1-5  cd /opt/bots/deploy && docker compose run --rm gitlab-notify python cron.py
+#   0 9 * * 1    cd /opt/bots/deploy && docker compose run --rm gitlab-notify python cron.py metrics
+# (`run --rm` reuses the named volume, so dedup state survives between runs.)

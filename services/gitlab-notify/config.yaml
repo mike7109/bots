@@ -38,11 +38,31 @@ rules:
     to: [room]
     mention: assignee
 
+  # Team-facing digests go to the shared room (run from cron, see cron.py):
+  - event: digest_team             # cron team: standup overview -> shared room
+    template: digest_team
+    to: [room]
+
+  - event: triage                  # cron triage: untriaged issues -> shared room
+    template: triage
+    to: [room]
+
+  - event: stale                   # cron stale: issues idle N days -> shared room
+    template: stale
+    to: [room]
+
+  - event: metrics                 # cron metrics (weekly): flow snapshot -> room
+    template: metrics
+    to: [room]
+
   # --- Personal DMs are OFF for now ------------------------------------------
-  # The capability exists (transport `dm`, template overdue). To turn on overdue
-  # reminders in private messages, uncomment this rule. The person accepts the
-  # bot's DM invite once, then it's silent.
+  # The capability exists (transport `dm`, templates overdue / digest_personal).
+  # To turn these on, the person accepts the bot's DM invite once, then it's
+  # silent. Uncomment to enable overdue reminders / the "what's on me" digest.
   # - event: overdue               # cron: due date already passed -> personal DM
   #   template: overdue
   #   to: [dm]
   #   mention: assignee
+  # - event: digest_personal       # cron digest: "what's on me" -> personal DM
+  #   template: digest_personal
+  #   to: [dm]
