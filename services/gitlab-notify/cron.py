@@ -109,10 +109,15 @@ def main(argv: list[str]) -> None:
             run_due_soon(engine, issues, store)
         if "overdue" in wanted:
             run_overdue(engine, issues, store)
+        schedule = dict(
+            anchor_days=digests.parse_days(env("DIGEST_ANCHOR_DAYS", "wed,fri")),
+            holidays=frozenset(d.strip() for d in env("DIGEST_HOLIDAYS", "").split(",") if d.strip()),
+            skip_weekends=env("DIGEST_SKIP_WEEKENDS", "true").lower() != "false",
+        )
         if "digest" in wanted:
-            digests.personal(engine, issues, store)
+            digests.personal(engine, issues, store, **schedule)
         if "team" in wanted:
-            digests.team(engine, issues, store)
+            digests.team(engine, issues, store, **schedule)
         if "triage" in wanted:
             digests.triage(engine, issues, store)
         if "stale" in wanted:

@@ -1,23 +1,27 @@
-"""Tiny SQLite ledger for idempotency / dedup across runs.
+"""Tiny SQLite store for idempotency / dedup and small state snapshots.
 
-Cron starts a fresh process each day, so "did I already send this?" has to
-survive restarts — it lives in a file on a mounted volume, not in memory.
+Cron starts a fresh process each day, so anything it needs to remember between
+runs has to survive restarts — it lives in a file on a mounted volume, not in
+memory. Two tables, both namespaced by `kind` so callers don't collide:
 
-The whole API is one table, `sent(kind, key, day)`:
+  sent(kind, key, day)   a one-shot ledger: "did I already send this today?"
 
-    store = Store()
     if not store.already_sent("overdue", issue_id):
-        ...send...
-        store.mark_sent("overdue", issue_id)
+        ...send...; store.mark_sent("overdue", issue_id)
 
-`day` defaults to today, so a reminder fires at most once per item per day:
-a second cron run today is a no-op, but tomorrow it can remind again (e.g. an
-issue that is still overdue). Digests and nudges will reuse the same ledger —
-keep keys namespaced by `kind` so they don't collide.
+  state(kind, key)       an arbitrary JSON snapshot keyed by (kind, key)
+
+    prev = store.get_state("digest_personal", login)   # last snapshot or None
+    ...compute delta vs prev...; store.set_state("digest_personal", login, cur)
+
+`day` defaults to today, so a reminder fires at most once per item per day: a
+second cron run today is a no-op, but tomorrow it can remind again. The state
+table powers delta digests — only notify when the snapshot actually changed.
 """
 from __future__ import annotations
 
 import datetime as dt
+import json
 import sqlite3
 from pathlib import Path
 
@@ -39,6 +43,14 @@ class Store:
             " ts   TEXT NOT NULL,"
             " PRIMARY KEY (kind, key, day))"
         )
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS state ("
+            " kind    TEXT NOT NULL,"
+            " key     TEXT NOT NULL,"
+            " value   TEXT NOT NULL,"
+            " updated TEXT NOT NULL,"
+            " PRIMARY KEY (kind, key))"
+        )
         self._db.commit()
 
     @staticmethod
@@ -56,6 +68,24 @@ class Store:
         self._db.execute(
             "INSERT OR IGNORE INTO sent (kind, key, day, ts) VALUES (?,?,?,?)",
             (kind, str(key), day or self._today(),
+             dt.datetime.now().isoformat(timespec="seconds")),
+        )
+        self._db.commit()
+
+    # --- state snapshots (JSON value per kind/key) -----------------------
+    def get_state(self, kind: str, key: str | int):
+        """Return the stored JSON snapshot for (kind, key), or None if unset."""
+        cur = self._db.execute(
+            "SELECT value FROM state WHERE kind=? AND key=?", (kind, str(key))
+        )
+        row = cur.fetchone()
+        return json.loads(row[0]) if row else None
+
+    def set_state(self, kind: str, key: str | int, value) -> None:
+        self._db.execute(
+            "INSERT INTO state (kind, key, value, updated) VALUES (?,?,?,?)"
+            " ON CONFLICT(kind, key) DO UPDATE SET value=excluded.value, updated=excluded.updated",
+            (kind, str(key), json.dumps(value, ensure_ascii=False),
              dt.datetime.now().isoformat(timespec="seconds")),
         )
         self._db.commit()

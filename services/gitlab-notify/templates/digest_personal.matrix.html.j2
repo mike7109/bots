@@ -1,3 +1,56 @@
 {% import "_sections.matrix.html.j2" as s %}
+{% if extra.mode == 'full' %}
 📋 <b>Задачи на сегодня</b> · {{ extra.date | ru_date }} · всего {{ extra.total }}<br>
 {{ s.render(extra.sections) }}
+{% else %}
+{% set ch = extra.changes %}
+🔔 <b>Изменения по задачам</b> · {{ extra.date | ru_date }}<br>
+{% if ch.new %}
+🆕 <b>Новые на тебе</b>
+<ul>
+{% for it in ch.new %}
+<li><a href="{{ it.url }}">#{{ it.iid }}</a> {{ it.title | truncate(70, true, '…', 0) }}{% if it.due %} — <i>{{ it.due | ru_date }}</i>{% endif %}</li>
+{% endfor %}
+</ul>
+{% endif %}
+{% if ch.moved %}
+➡️ <b>Сменили статус</b>
+<ul>
+{% for it in ch.moved %}
+<li><a href="{{ it.url }}">#{{ it.iid }}</a> {{ it.title | truncate(60, true, '…', 0) }} · <i>{{ it.from or 'Открыта' }}</i> → <b>{{ it.col or 'Открыта' }}</b></li>
+{% endfor %}
+</ul>
+{% endif %}
+{% if ch.overdue %}
+⏰ <b>Стали просрочены</b>
+<ul>
+{% for it in ch.overdue %}
+<li><a href="{{ it.url }}">#{{ it.iid }}</a> {{ it.title | truncate(70, true, '…', 0) }} — <i>был {{ it.due | ru_date }}</i></li>
+{% endfor %}
+</ul>
+{% endif %}
+{% if ch.today %}
+📅 <b>Дедлайн сегодня</b>
+<ul>
+{% for it in ch.today %}
+<li><a href="{{ it.url }}">#{{ it.iid }}</a> {{ it.title | truncate(70, true, '…', 0) }}</li>
+{% endfor %}
+</ul>
+{% endif %}
+{% if ch.due %}
+📆 <b>Сменился срок</b>
+<ul>
+{% for it in ch.due %}
+<li><a href="{{ it.url }}">#{{ it.iid }}</a> {{ it.title | truncate(60, true, '…', 0) }} · <i>{{ it.from_due | ru_date if it.from_due else '—' }}</i> → <b>{{ it.due | ru_date if it.due else '—' }}</b></li>
+{% endfor %}
+</ul>
+{% endif %}
+{% if ch.removed %}
+✅ <b>Сняты с тебя / закрыты</b>
+<ul>
+{% for it in ch.removed %}
+<li><a href="{{ it.url }}">#{{ it.iid }}</a> {{ it.title | truncate(70, true, '…', 0) }}</li>
+{% endfor %}
+</ul>
+{% endif %}
+{% endif %}

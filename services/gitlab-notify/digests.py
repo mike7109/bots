@@ -26,11 +26,28 @@ from botkit.notify.event import Event
 
 log = logging.getLogger("gitlab-notify.digest")
 
+WORKFLOW_PREFIX = "workflow::"          # board-column scoped labels
 IN_PROGRESS = "workflow::in progress"   # the team's agreed "started" label
 TEAM_SOON_DAYS = 3                      # team digest "near deadlines" window
 PERSONAL_SOON_DAYS = 7                  # personal digest "this week" window
 STALE_DAYS = 14                         # no activity for this long -> stale
 METRICS_WINDOW = 7                      # metrics look-back, days
+
+# Personal digest is delta-driven: it only writes when something actually
+# changed, so people aren't pinged with the same list every morning. On
+# "anchor" weekdays it sends a full overview even with no changes (defaults to
+# Wed+Fri — issues are usually handed out Mon, so a midweek/end-of-week recap
+# helps). Weekends and listed holidays are fully silent.
+ANCHOR_DAYS = frozenset({2, 4})         # Wed, Fri (0=Mon .. 6=Sun)
+_WEEKDAYS = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
+
+
+def parse_days(spec: str) -> frozenset[int]:
+    """'wed,fri' -> {2, 4}. Unknown tokens are ignored."""
+    return frozenset(
+        _WEEKDAYS[t.strip().lower()[:3]] for t in spec.split(",")
+        if t.strip().lower()[:3] in _WEEKDAYS
+    )
 
 
 # --- shared helpers ------------------------------------------------------
@@ -42,6 +59,19 @@ def _date(s: str) -> dt.date:
     return dt.date.fromisoformat(str(s)[:10])
 
 
+def _column(labels) -> str | None:
+    """The board column an issue sits in = its `workflow::` scoped label.
+
+    On Free these aren't mutually exclusive (that's Premium), so an issue can
+    carry several — we take the first. None means it's in the default Open
+    list (no workflow label yet).
+    """
+    for lbl in labels or []:
+        if lbl.startswith(WORKFLOW_PREFIX):
+            return lbl[len(WORKFLOW_PREFIX):]
+    return None
+
+
 def _row(issue: dict) -> dict:
     """The per-issue shape templates iterate over."""
     return {
@@ -50,8 +80,56 @@ def _row(issue: dict) -> dict:
         "url": issue.get("web_url", ""),
         "due": issue.get("due_date"),
         "labels": issue.get("labels", []),
+        "col": _column(issue.get("labels", [])),
         "assignees": [a.get("username") for a in (issue.get("assignees") or []) if a.get("username")],
     }
+
+
+def _bucket(due: str, today_iso: str, horizon_iso: str) -> str:
+    if not due:
+        return "none"
+    if due < today_iso:
+        return "overdue"
+    if due == today_iso:
+        return "today"
+    if due <= horizon_iso:
+        return "soon"
+    return "later"
+
+
+def _snapshot(rows: list[dict], today_iso: str, horizon_iso: str) -> dict:
+    """Per-issue state we compare run-to-run to detect what changed."""
+    return {
+        str(r["iid"]): {
+            "iid": r["iid"], "title": r["title"], "url": r["url"],
+            "due": r["due"] or "", "col": r["col"], "assignees": r["assignees"],
+            "bucket": _bucket(r["due"], today_iso, horizon_iso),
+        }
+        for r in rows
+    }
+
+
+def _diff(prev: dict, cur: dict) -> dict:
+    """Categorise what changed between two snapshots of one person's issues."""
+    out = {"new": [], "removed": [], "moved": [], "due": [], "overdue": [], "today": []}
+    pids, cids = set(prev), set(cur)
+    for i in cids - pids:
+        out["new"].append(cur[i])
+    for i in pids - cids:
+        out["removed"].append(prev[i])
+    for i in cids & pids:
+        p, c = prev[i], cur[i]
+        if c["col"] != p["col"]:
+            out["moved"].append({**c, "from": p["col"]})
+        if c["due"] != p["due"]:
+            out["due"].append({**c, "from_due": p["due"]})
+        elif c["bucket"] != p["bucket"]:
+            # deadline didn't move, but time passed: did it cross into overdue/today?
+            if c["bucket"] == "overdue":
+                out["overdue"].append(c)
+            elif c["bucket"] == "today":
+                out["today"].append(c)
+    return out
 
 
 def _by_due(rows: list[dict]) -> list[dict]:
@@ -73,10 +151,40 @@ def _emit(engine, store, kind: str, dedup_key: str, extra: dict, assignees=None)
 
 
 # --- passes --------------------------------------------------------------
-def personal(engine, issues: list[dict], store) -> int:
-    """Per-assignee DM: their open issues grouped by how soon they're due."""
-    today = _today().isoformat()
-    horizon = (_today() + dt.timedelta(days=PERSONAL_SOON_DAYS)).isoformat()
+def _full_sections(rows: list[dict], today: str, horizon: str) -> list[dict]:
+    """The grouped-by-deadline view used for the anchor-day overview."""
+    overdue = [r for r in rows if r["due"] and r["due"] < today]
+    due_today = [r for r in rows if r["due"] == today]
+    soon = [r for r in rows if r["due"] and today < r["due"] <= horizon]
+    no_date = [r for r in rows if not r["due"]]
+    sections = []
+    if overdue:
+        sections.append({"emoji": "⏰", "title": "Просрочено", "items": _by_due(overdue)})
+    if due_today:
+        sections.append({"emoji": "📅", "title": "Сегодня", "items": due_today})
+    if soon:
+        sections.append({"emoji": "🔜", "title": "На этой неделе", "items": _by_due(soon)})
+    if no_date:
+        sections.append({"emoji": "📋", "title": "Без срока", "items": no_date})
+    return sections
+
+
+def personal(engine, issues: list[dict], store, *, today: dt.date | None = None,
+             anchor_days=ANCHOR_DAYS, holidays=frozenset(), skip_weekends: bool = True) -> int:
+    """Per-assignee DM, delta-driven.
+
+    Only writes when a person's issues actually changed (new / moved column /
+    due changed / crossed into overdue-or-today / removed) — no daily repeat of
+    an unchanged list. On `anchor_days` it sends a full overview regardless.
+    Weekends (unless skip_weekends=False) and `holidays` (ISO dates) are silent.
+    """
+    today = today or _today()
+    iso = today.isoformat()
+    if (skip_weekends and today.weekday() >= 5) or iso in holidays:
+        log.info("personal digest: quiet day (%s) — silent", iso)
+        return 0
+    is_anchor = today.weekday() in anchor_days
+    horizon = (today + dt.timedelta(days=PERSONAL_SOON_DAYS)).isoformat()
 
     by_user: dict[str, list[dict]] = {}
     for issue in issues:
@@ -87,41 +195,40 @@ def personal(engine, issues: list[dict], store) -> int:
 
     sent = 0
     for login, items in sorted(by_user.items()):
-        rows = [_row(i) for i in items]
-        overdue = [r for r in rows if r["due"] and r["due"] < today]
-        due_today = [r for r in rows if r["due"] == today]
-        soon = [r for r in rows if r["due"] and today < r["due"] <= horizon]
-        no_date = [r for r in rows if not r["due"]]
-
-        sections = []
-        if overdue:
-            sections.append({"emoji": "⏰", "title": "Просрочено", "items": _by_due(overdue)})
-        if due_today:
-            sections.append({"emoji": "📅", "title": "Сегодня", "items": due_today})
-        if soon:
-            sections.append({"emoji": "🔜", "title": "На этой неделе", "items": _by_due(soon)})
-        if no_date:
-            sections.append({"emoji": "📋", "title": "Без срока", "items": no_date})
-        if not sections:
+        if store.already_sent("digest_personal", login, day=iso):   # one DM per person per day
             continue
+        rows = [_row(i) for i in items]
+        current = _snapshot(rows, iso, horizon)
+        prev = store.get_state("digest_personal", login)
 
-        sent += _emit(
-            engine, store, "digest_personal", login,
-            {"date": today, "sections": sections, "total": len(rows)},
-            assignees=[login],
-        )
-    log.info("personal digest: %d sent", sent)
+        if is_anchor:
+            extra = {"mode": "full", "date": iso, "total": len(rows),
+                     "sections": _full_sections(rows, iso, horizon)}
+        elif prev is None:
+            # First time we see this person off an anchor day: learn their
+            # baseline silently, so the next change is a real delta, not "all new".
+            store.set_state("digest_personal", login, current)
+            continue
+        else:
+            changes = _diff(prev, current)
+            if not any(changes.values()):
+                continue                                    # nothing changed -> silent
+            extra = {"mode": "delta", "date": iso, "changes": changes}
+
+        event = Event(kind="digest_personal", action="digest", assignees=[login], extra=extra)
+        result = engine.handle(event)
+        if result.get("sent"):
+            store.mark_sent("digest_personal", login, day=iso)
+            store.set_state("digest_personal", login, current)
+            sent += 1
+        else:
+            log.warning("digest_personal [%s] not delivered: %s", login, result)
+    log.info("personal digest: %d sent (%s)", sent, "anchor" if is_anchor else "delta")
     return sent
 
 
-def team(engine, issues: list[dict], store) -> int:
-    """Shared room standup overview across the whole group."""
-    today = _today().isoformat()
-    horizon = (_today() + dt.timedelta(days=TEAM_SOON_DAYS)).isoformat()
-    rows = [_row(i) for i in issues]
-
-    # Each issue lands in exactly one section, most-urgent-first, so a single
-    # issue can't show up under both "near deadline" and "in progress".
+def _team_sections(rows: list[dict], today: str, horizon: str) -> list[dict]:
+    """Standup overview, each issue in exactly one section, most-urgent-first."""
     overdue, due_today, soon, in_progress = [], [], [], []
     for r in rows:
         if r["due"] and r["due"] < today:
@@ -132,7 +239,6 @@ def team(engine, issues: list[dict], store) -> int:
             soon.append(r)
         elif IN_PROGRESS in (r["labels"] or []):
             in_progress.append(r)
-
     sections = []
     if overdue:
         sections.append({"emoji": "⏰", "title": "Просрочено", "items": _by_due(overdue), "show_who": True})
@@ -142,12 +248,53 @@ def team(engine, issues: list[dict], store) -> int:
         sections.append({"emoji": "🔜", "title": "Ближайшие дедлайны", "items": _by_due(soon), "show_who": True})
     if in_progress:
         sections.append({"emoji": "🚧", "title": "В работе", "items": in_progress, "show_who": True})
-    if not sections:
-        log.info("team digest: nothing to report")
-        return 0
+    return sections
 
-    return _emit(engine, store, "digest_team", "group",
-                 {"date": today, "sections": sections, "open_total": len(rows)})
+
+def team(engine, issues: list[dict], store, *, today: dt.date | None = None,
+         anchor_days=ANCHOR_DAYS, holidays=frozenset(), skip_weekends: bool = True) -> int:
+    """Shared room standup digest, delta-driven (same rules as `personal`).
+
+    Writes only when the group's issues changed, except on `anchor_days` where
+    it posts a full standup overview. Weekends/holidays are silent.
+    """
+    today = today or _today()
+    iso = today.isoformat()
+    if (skip_weekends and today.weekday() >= 5) or iso in holidays:
+        log.info("team digest: quiet day (%s) — silent", iso)
+        return 0
+    is_anchor = today.weekday() in anchor_days
+    sec_horizon = (today + dt.timedelta(days=TEAM_SOON_DAYS)).isoformat()
+    snap_horizon = (today + dt.timedelta(days=PERSONAL_SOON_DAYS)).isoformat()
+
+    rows = [_row(i) for i in issues]
+    current = _snapshot(rows, iso, snap_horizon)
+    prev = store.get_state("digest_team", "group")
+
+    if store.already_sent("digest_team", "group", day=iso):
+        return 0
+    if is_anchor:
+        sections = _team_sections(rows, iso, sec_horizon)
+        if not sections:
+            return 0
+        extra = {"mode": "full", "date": iso, "open_total": len(rows), "sections": sections}
+    elif prev is None:
+        store.set_state("digest_team", "group", current)   # learn baseline silently
+        return 0
+    else:
+        changes = _diff(prev, current)
+        if not any(changes.values()):
+            return 0
+        extra = {"mode": "delta", "date": iso, "changes": changes}
+
+    event = Event(kind="digest_team", action="digest", extra=extra)
+    result = engine.handle(event)
+    if result.get("sent"):
+        store.mark_sent("digest_team", "group", day=iso)
+        store.set_state("digest_team", "group", current)
+        return 1
+    log.warning("digest_team not delivered: %s", result)
+    return 0
 
 
 def triage(engine, issues: list[dict], store) -> int:
