@@ -23,8 +23,13 @@ class MatrixDirectTransport:
                 if mxid:
                     targets.append(mxid)
         if not targets:
-            # No one to DM (unassigned issue) — skip rather than crash the run.
-            return {"skipped": "no assignee mxid for DM"}
+            # No one to DM (unassigned issue) — fall back to the shared room so
+            # it isn't lost; nobody to ping there.
+            room = defaults.get("room_id")
+            if room:
+                self.client.send_html(room, rendered, notice=True)
+                return {"fallback_room": room}
+            return {"skipped": "no assignee and no room_id"}
 
         for mxid in targets:
             room = self.client.get_or_create_dm(mxid)

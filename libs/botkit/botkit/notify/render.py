@@ -32,11 +32,19 @@ _RU_MONTHS = ["", "января", "февраля", "марта", "апреля"
               "июля", "августа", "сентября", "октября", "ноября", "декабря"]
 
 
+_MAX_LABELS = 5   # cap chips so a 100-label issue doesn't flood the line
+
+
 def _labels_html(labels) -> Markup:
-    """Render GitLab labels as little 🏷 chips (escaped)."""
+    """Render GitLab labels as little 🏷 chips (escaped), capped with `+N`."""
     if not labels:
         return Markup("")
-    return Markup(" ".join(f"🏷 {escape(name)}" for name in labels))
+    shown = labels[:_MAX_LABELS]
+    chips = " ".join(f"🏷 {escape(name)}" for name in shown)
+    extra = len(labels) - len(shown)
+    if extra > 0:
+        chips += f" +{extra}"
+    return Markup(chips)
 
 
 def _ru_date(iso) -> str:
