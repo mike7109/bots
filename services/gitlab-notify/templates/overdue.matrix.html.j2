@@ -1,2 +1,2 @@
-⏰ <b>Просрочено</b> (дедлайн был {{ due | ru_date }}){{ meta(labels, assignees) }}<br>
+{% if labels %}{{ labels_html(labels) }}<br>{% endif %}⏰ <b>Просрочено</b> (дедлайн был {{ due | ru_date }}){{ who(assignees) }}<br>
 <a href="{{ url }}">#{{ iid }}</a> <b>{{ title }}</b>

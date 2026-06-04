@@ -1,2 +1,2 @@
-{{ action | action_emoji }} <b>{{ action | ru_action }}</b>{{ meta(labels, assignees) }}<br>
+{% if labels %}{{ labels_html(labels) }}<br>{% endif %}{{ action | action_emoji }} <b>{{ action | ru_action }}</b>{{ who(assignees) }}<br>
 <a href="{{ url }}">#{{ iid }}</a> <b>{{ title }}</b>

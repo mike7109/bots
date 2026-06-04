@@ -76,6 +76,14 @@ def _make_meta(mentions):
     return meta
 
 
+def _make_who(mentions):
+    """A ` · @A и @B` assignees suffix (leading separator), "" if none."""
+    def who(assignees=None) -> Markup:
+        names = mentions(assignees)
+        return Markup(" · " + str(names)) if names else Markup("")
+    return who
+
+
 class Renderer:
     def __init__(self, templates_dir: str | os.PathLike, identity=None):
         self.env = Environment(
@@ -90,7 +98,8 @@ class Renderer:
         self.env.globals["labels_html"] = _labels_html
         self.env.globals["mention"] = pill          # single @pill
         self.env.globals["mentions"] = mentions     # natural list of @pills
-        self.env.globals["meta"] = _make_meta(mentions)
+        self.env.globals["meta"] = _make_meta(mentions)   # " · 🏷 chips · @who"
+        self.env.globals["who"] = _make_who(mentions)     # " · @who" (assignees only)
         self.env.filters["ru_action"] = lambda action: _RU_ACTION.get(action, action)
         self.env.filters["action_emoji"] = lambda action: _ACTION_EMOJI.get(action, "•")
         self.env.filters["ru_date"] = _ru_date
