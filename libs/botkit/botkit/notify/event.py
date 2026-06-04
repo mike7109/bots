@@ -19,7 +19,7 @@ class Event:
     url: str = ""
     state: str = ""                 # opened | closed | ...
     labels: list[str] = field(default_factory=list)
-    assignee: str | None = None     # GitLab login (resolved to Matrix/email via Identity)
+    assignees: list[str] = field(default_factory=list)  # GitLab logins (resolved via Identity)
     author: str | None = None       # GitLab login of who triggered it
     due: str | None = None          # ISO date, for due_soon
     extra: dict = field(default_factory=dict)  # anything source-specific

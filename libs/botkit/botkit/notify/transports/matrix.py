@@ -17,12 +17,13 @@ class MatrixTransport:
         if not room:
             raise RuntimeError("room transport: no room_id (set env MATRIX_ROOM or defaults.room_id)")
 
-        # `mention: assignee` in the rule => actually ping that person.
+        # `mention: assignee` in the rule => actually ping every assignee.
         mentions: list[str] = []
-        if rule.get("mention") == "assignee" and event.assignee and self.identity:
-            mxid = self.identity.matrix_id(event.assignee)
-            if mxid:
-                mentions.append(mxid)
+        if rule.get("mention") == "assignee" and self.identity:
+            for login in event.assignees:
+                mxid = self.identity.matrix_id(login)
+                if mxid:
+                    mentions.append(mxid)
 
         self.client.send_html(
             room, rendered,

@@ -28,7 +28,7 @@ def main() -> None:
     for issue in issues:
         if issue.get("due_date") != tomorrow:
             continue
-        assignees = issue.get("assignees") or []
+        assignees = [a.get("username") for a in (issue.get("assignees") or []) if a.get("username")]
         event = Event(
             kind="due_soon",
             action="due",
@@ -38,7 +38,7 @@ def main() -> None:
             url=issue.get("web_url", ""),
             state=issue.get("state", ""),
             labels=issue.get("labels", []),
-            assignee=assignees[0].get("username") if assignees else None,
+            assignees=assignees,
             due=issue.get("due_date"),
         )
         engine.handle(event)

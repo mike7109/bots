@@ -15,11 +15,18 @@ class MatrixDirectTransport:
         self.identity = identity
 
     def dispatch(self, event, rule: dict, rendered: str, defaults: dict) -> dict:
-        mxid = self.identity.matrix_id(event.assignee) if (self.identity and event.assignee) else None
-        if not mxid:
+        # DM every assignee their own copy (1:1 room each).
+        targets = []
+        if self.identity:
+            for login in event.assignees:
+                mxid = self.identity.matrix_id(login)
+                if mxid:
+                    targets.append(mxid)
+        if not targets:
             # No one to DM (unassigned issue) — skip rather than crash the run.
             return {"skipped": "no assignee mxid for DM"}
 
-        room = self.client.get_or_create_dm(mxid)
-        self.client.send_html(room, rendered, mention_user_ids=[mxid], notice=False)
-        return {"dm_room": room, "to": mxid}
+        for mxid in targets:
+            room = self.client.get_or_create_dm(mxid)
+            self.client.send_html(room, rendered, mention_user_ids=[mxid], notice=False)
+        return {"dm_to": targets}

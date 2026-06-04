@@ -48,18 +48,30 @@ def _ru_date(iso) -> str:
         return iso or ""
 
 
-def _make_meta(pill):
-    """A ` · 🏷 chips · @pill` suffix, omitting whichever parts are empty.
-    Returns "" when there are neither labels nor an assignee."""
-    def meta(labels=None, assignee=None) -> Markup:
+def _make_mentions(pill):
+    """Natural-language list of @pills:
+    1 -> "@A", 2 -> "@A и @B", 3+ -> "@A, @B и @C"."""
+    def mentions(logins) -> Markup:
+        pills = [p for p in (str(pill(l)) for l in (logins or []) if l) if p]
+        if not pills:
+            return Markup("")
+        if len(pills) == 1:
+            return Markup(pills[0])
+        return Markup(", ".join(pills[:-1]) + " и " + pills[-1])
+    return mentions
+
+
+def _make_meta(mentions):
+    """A ` · 🏷 chips · @who` suffix, omitting whichever parts are empty.
+    `assignees` is a list of logins. Returns "" when nothing to show."""
+    def meta(labels=None, assignees=None) -> Markup:
         parts = []
         chips = _labels_html(labels)
         if chips:
             parts.append(str(chips))
-        if assignee:
-            who = pill(assignee)
-            if who:
-                parts.append(str(who))
+        who = mentions(assignees)
+        if who:
+            parts.append(str(who))
         return Markup(" · " + " · ".join(parts)) if parts else Markup("")
     return meta
 
@@ -73,10 +85,12 @@ class Renderer:
             lstrip_blocks=True,
         )
         pill = identity.matrix_pill if identity is not None else (lambda login: Markup(""))
+        mentions = _make_mentions(pill)
 
         self.env.globals["labels_html"] = _labels_html
-        self.env.globals["mention"] = pill
-        self.env.globals["meta"] = _make_meta(pill)
+        self.env.globals["mention"] = pill          # single @pill
+        self.env.globals["mentions"] = mentions     # natural list of @pills
+        self.env.globals["meta"] = _make_meta(mentions)
         self.env.filters["ru_action"] = lambda action: _RU_ACTION.get(action, action)
         self.env.filters["action_emoji"] = lambda action: _ACTION_EMOJI.get(action, "•")
         self.env.filters["ru_date"] = _ru_date

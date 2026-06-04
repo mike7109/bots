@@ -26,8 +26,7 @@ def _issue(payload: dict) -> Event | None:
     if action is None:
         return None
 
-    assignees = payload.get("assignees") or []
-    assignee = assignees[0].get("username") if assignees else None
+    assignees = [a.get("username") for a in (payload.get("assignees") or []) if a.get("username")]
     labels = [lbl.get("title", "") for lbl in payload.get("labels", [])]
 
     return Event(
@@ -39,7 +38,7 @@ def _issue(payload: dict) -> Event | None:
         url=attr.get("url", ""),
         state=attr.get("state", ""),
         labels=labels,
-        assignee=assignee,
+        assignees=assignees,
         author=(payload.get("user") or {}).get("username"),
         due=attr.get("due_date"),
     )
