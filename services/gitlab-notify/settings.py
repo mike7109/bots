@@ -89,6 +89,16 @@ class Settings:
             return False
         return default_notice
 
+    # --- rule overrides (enable/disable + destination) -------------------
+    def rule_override(self, event: str) -> dict | None:
+        return self.store.get_state(_KIND, f"rule:{event}")
+
+    def update_rule(self, event: str, patch: dict) -> dict:
+        cur = self.store.get_state(_KIND, f"rule:{event}") or {}
+        cur.update(patch)
+        self.store.set_state(_KIND, f"rule:{event}", cur)
+        return cur
+
 
 def weekday_names(days) -> str:
     return ", ".join(_WEEKDAY_NAMES[d] for d in sorted(days)) or "—"

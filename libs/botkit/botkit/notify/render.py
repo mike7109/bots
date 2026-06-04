@@ -115,3 +115,9 @@ class Renderer:
     def render(self, template: str, channel: str, ctx: dict, fmt: str = "html") -> str:
         tmpl = self.env.get_template(f"{template}.{channel}.{fmt}.j2")
         return tmpl.render(**ctx).strip()
+
+    def render_string(self, content: str, ctx: dict) -> str:
+        """Render raw (possibly unsaved) template text — used by the admin
+        preview. Shares the env's globals/filters/loader, so helpers like
+        `who`/`ru_date` and `{% import %}` of shared partials work."""
+        return self.env.from_string(content).render(**ctx).strip()

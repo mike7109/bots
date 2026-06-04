@@ -55,6 +55,14 @@ class Store:
             " updated TEXT NOT NULL,"
             " PRIMARY KEY (kind, key))"
         )
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS log ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " ts TEXT NOT NULL, day TEXT NOT NULL,"
+            " kind TEXT, action TEXT, channel TEXT,"
+            " status TEXT NOT NULL,"      # sent | skipped | error | ignored
+            " detail TEXT)"
+        )
         self._db.commit()
 
     @staticmethod
@@ -97,6 +105,43 @@ class Store:
                  dt.datetime.now().isoformat(timespec="seconds")),
             )
             self._db.commit()
+
+    # --- activity log + stats -------------------------------------------
+    def log_event(self, kind, action, channel, status: str, detail: str = "") -> None:
+        now = dt.datetime.now()
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO log (ts, day, kind, action, channel, status, detail)"
+                " VALUES (?,?,?,?,?,?,?)",
+                (now.isoformat(timespec="seconds"), now.date().isoformat(),
+                 kind, action, channel, status, detail[:500]),
+            )
+            self._db.commit()
+
+    def recent_log(self, limit: int = 100, status: str | None = None) -> list[dict]:
+        q = "SELECT ts, kind, action, channel, status, detail FROM log"
+        args: tuple = ()
+        if status:
+            q += " WHERE status=?"
+            args = (status,)
+        q += " ORDER BY id DESC LIMIT ?"
+        with self._lock:
+            rows = self._db.execute(q, (*args, limit)).fetchall()
+        cols = ("ts", "kind", "action", "channel", "status", "detail")
+        return [dict(zip(cols, r)) for r in rows]
+
+    def log_stats(self, days: int = 7) -> dict:
+        today = dt.date.today().isoformat()
+        since = (dt.date.today() - dt.timedelta(days=days - 1)).isoformat()
+        with self._lock:
+            by_status_today = dict(self._db.execute(
+                "SELECT status, count(*) FROM log WHERE day=? GROUP BY status", (today,)).fetchall())
+            by_status_week = dict(self._db.execute(
+                "SELECT status, count(*) FROM log WHERE day>=? GROUP BY status", (since,)).fetchall())
+            by_kind = dict(self._db.execute(
+                "SELECT kind, count(*) FROM log WHERE day>=? AND status='sent' GROUP BY kind ORDER BY 2 DESC",
+                (since,)).fetchall())
+        return {"today": by_status_today, "week": by_status_week, "by_kind": by_kind, "days": days}
 
     def close(self) -> None:
         with self._lock:

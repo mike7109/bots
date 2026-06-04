@@ -29,6 +29,34 @@ import cron
 log = logging.getLogger("gitlab-notify.admin")
 COOKIE = "admin_session"
 
+# Representative context for the template preview — populated for every template
+# variant (issue / due / overdue / digests / triage / stale / metrics) so the
+# operator sees roughly what a real message renders to.
+SAMPLE_CTX = {
+    "kind": "issue", "action": "overdue", "project": "qa/infra", "iid": "42",
+    "title": "Пример: продлить TLS-сертификаты", "url": "https://gitlab.local/qa/infra/-/issues/42",
+    "state": "opened", "labels": ["infra", "security"],
+    "assignees": ["misha", "d.nikulin"], "author": "misha", "due": "2026-06-10",
+    "extra": {
+        "mode": "full", "date": "2026-06-05", "total": 3, "open_total": 9, "days": 14,
+        "window": 7, "throughput": 5, "wip": 2, "age_med": 4, "cycle_p85": 12,
+        "sections": [
+            {"emoji": "⏰", "title": "Просрочено", "show_who": True, "items": [
+                {"iid": 42, "title": "Продлить TLS-сертификаты", "url": "#",
+                 "due": "2026-06-01", "assignees": ["misha"]}]},
+            {"emoji": "📋", "title": "Без срока", "items": [
+                {"iid": 7, "title": "Обновить документацию", "url": "#",
+                 "due": None, "assignees": ["d.nikulin"]}]},
+        ],
+        "changes": {
+            "new": [{"iid": 7, "title": "Новая задача на тебе", "url": "#", "due": "2026-06-12", "assignees": ["misha"]}],
+            "moved": [{"iid": 3, "title": "Обновить раннеры", "url": "#", "col": "review", "from": "in progress", "assignees": ["misha"]}],
+            "overdue": [{"iid": 42, "title": "Продлить сертификаты", "url": "#", "due": "2026-06-01", "assignees": ["misha"]}],
+            "today": [], "due": [], "removed": [],
+        },
+    },
+}
+
 
 def _expected_token() -> str | None:
     pw = env("ADMIN_PASSWORD")
@@ -109,11 +137,16 @@ def create_admin_router(engine) -> APIRouter:
         for login, u in users.items():
             u.update(settings.user_pref(login))
         templates = sorted(p.name for p in engine.templates_dir.glob("*.j2") if not p.name.startswith("_"))
-        rules = [
-            {"event": r.get("event"), "actions": r.get("actions"),
-             "template": r.get("template"), "to": r.get("to")}
-            for r in engine.config.get("rules", [])
-        ]
+        rules = []
+        for r in engine.config.get("rules", []):
+            ov = settings.rule_override(r.get("event")) or {}
+            rules.append({
+                "event": r.get("event"), "actions": r.get("actions"),
+                "template": r.get("template"),
+                "to": ov.get("to", r.get("to")),       # effective destination
+                "default_to": r.get("to"),
+                "enabled": ov.get("enabled", True),
+            })
         return {
             "enabled": g["enabled"],
             "schedule": {
@@ -128,6 +161,7 @@ def create_admin_router(engine) -> APIRouter:
             "templates": templates,
             "passes": list(cron.PASSES),
             "push_modes": list(PUSH_MODES),
+            "stats": engine.store.log_stats(7),
         }
 
     @router.post("/api/global")
@@ -159,6 +193,34 @@ def create_admin_router(engine) -> APIRouter:
         except Exception as e:                   # noqa: BLE001
             log.exception("manual trigger %s failed", name)
             return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+    @router.post("/api/rule/{event}")
+    async def set_rule(event: str, request: Request, admin_session: str | None = Cookie(default=None)):
+        _guard(admin_session)
+        body = await request.json()
+        patch = {}
+        if "enabled" in body:
+            patch["enabled"] = bool(body["enabled"])
+        if "to" in body and isinstance(body["to"], list) and all(t in ("room", "dm") for t in body["to"]):
+            patch["to"] = body["to"]
+        return settings.update_rule(event, patch)
+
+    @router.get("/api/logs")
+    def logs(limit: int = 100, status: str | None = None,
+             admin_session: str | None = Cookie(default=None)):
+        _guard(admin_session)
+        return {"rows": settings.store.recent_log(min(limit, 500), status),
+                "stats": settings.store.log_stats(7)}
+
+    @router.post("/api/template/preview")
+    async def preview(request: Request, admin_session: str | None = Cookie(default=None)):
+        _guard(admin_session)
+        body = await request.json()
+        try:
+            html = engine.renderer.render_string(body.get("content", ""), SAMPLE_CTX)
+            return {"ok": True, "html": html}
+        except Exception as e:                       # noqa: BLE001 — show the Jinja error
+            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
     @router.get("/api/template")
     def get_template(name: str, admin_session: str | None = Cookie(default=None)):

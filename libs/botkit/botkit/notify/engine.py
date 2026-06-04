@@ -47,26 +47,51 @@ class Engine:
             return rule
         return None
 
+    def _record(self, event, status, channel, detail=""):
+        store = getattr(self.settings, "store", None) if self.settings is not None else None
+        if store is not None:
+            try:
+                store.log_event(event.kind, event.action, channel, status, detail)
+            except Exception:                       # noqa: BLE001 — logging must never break delivery
+                log.exception("activity log write failed")
+
     def handle(self, event: Event) -> dict:
         # Global kill switch (admin panel): when off, the bot sends nothing.
         if self.settings is not None and not self.settings.enabled():
+            self._record(event, "ignored", "", "бот выключен")
             return {"ignored": "bot disabled", "kind": event.kind, "action": event.action}
 
         rule = self.match(event)
         if rule is None:
             return {"ignored": "no matching rule", "kind": event.kind, "action": event.action}
 
+        # Admin rule override: disable a rule, or change its destination.
+        if self.settings is not None:
+            ov = self.settings.rule_override(event.kind)
+            if ov:
+                if ov.get("enabled") is False:
+                    self._record(event, "ignored", "", "правило выключено в админке")
+                    return {"ignored": "rule disabled (admin)", "kind": event.kind}
+                if ov.get("to"):
+                    rule = {**rule, "to": ov["to"]}
+
         destinations = rule.get("to") or self.defaults.get("to", ["room"])
         ctx = asdict(event)
-        sent, skipped = [], []
+        sent, skipped, errors = [], [], []
         for dest in destinations:
             transport = self.transports.get(dest)
             if transport is None:
                 skipped.append(dest)
                 continue
             medium = getattr(transport, "medium", "matrix")
-            rendered = self.renderer.render(rule["template"], medium, ctx)
-            outcome = transport.dispatch(event, rule, rendered, self.defaults)
+            try:
+                rendered = self.renderer.render(rule["template"], medium, ctx)
+                outcome = transport.dispatch(event, rule, rendered, self.defaults)
+            except Exception as e:                  # noqa: BLE001 — one bad dest mustn't sink the rest
+                errors.append(dest)
+                log.exception("dispatch to %s failed", dest)
+                self._record(event, "error", dest, f"{type(e).__name__}: {e}")
+                continue
             # A transport can decline to deliver (e.g. DM with no assignee and no
             # fallback room) by returning {"skipped": ...}; don't count that as sent.
             if isinstance(outcome, dict) and "skipped" in outcome:
@@ -75,7 +100,13 @@ class Engine:
                 sent.append(dest)
 
         log.info("handled %s/%s -> %s", event.kind, event.action, sent)
+        if sent:
+            self._record(event, "sent", ",".join(sent), f"#{event.iid} {event.title}"[:200])
+        elif skipped and not errors:
+            self._record(event, "skipped", ",".join(skipped), f"#{event.iid} {event.title}"[:200])
         result = {"sent": sent}
         if skipped:
             result["skipped"] = skipped
+        if errors:
+            result["errors"] = errors
         return result
