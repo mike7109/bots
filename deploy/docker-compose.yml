@@ -18,6 +18,7 @@ services:
     volumes:
       - ../services/gitlab-notify/config.yaml:/app/svc/config.yaml:ro
       - ../services/gitlab-notify/templates:/app/svc/templates:ro
+      - gitlab-notify-state:/data            # SQLite dedup ledger (STATE_DB=/data/state.db)
 
   gitlab-expand-tasks:
     image: ghcr.io/mike7109/gitlab-expand-tasks:latest
@@ -27,5 +28,9 @@ services:
     ports:
       - "127.0.0.1:8080:8080"
 
+volumes:
+  gitlab-notify-state:                       # persists the cron dedup ledger across runs
+
 # Due-date reminders: run gitlab-notify's cron.py once a day from host cron, e.g.
 #   0 9 * * *  cd /opt/bots/deploy && docker compose run --rm gitlab-notify python cron.py
+# (`run --rm` reuses the same named volume, so overdue dedup survives between runs.)

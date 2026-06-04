@@ -61,11 +61,16 @@ class Engine:
                 continue
             medium = getattr(transport, "medium", "matrix")
             rendered = self.renderer.render(rule["template"], medium, ctx)
-            transport.dispatch(event, rule, rendered, self.defaults)
-            sent.append(dest)
+            outcome = transport.dispatch(event, rule, rendered, self.defaults)
+            # A transport can decline to deliver (e.g. DM with no assignee and no
+            # fallback room) by returning {"skipped": ...}; don't count that as sent.
+            if isinstance(outcome, dict) and "skipped" in outcome:
+                skipped.append(dest)
+            else:
+                sent.append(dest)
 
         log.info("handled %s/%s -> %s", event.kind, event.action, sent)
         result = {"sent": sent}
         if skipped:
-            result["skipped_unconfigured"] = skipped
+            result["skipped"] = skipped
         return result
