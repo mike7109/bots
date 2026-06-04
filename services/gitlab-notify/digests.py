@@ -39,7 +39,13 @@ METRICS_WINDOW = 7                      # metrics look-back, days
 # Wed+Fri — issues are usually handed out Mon, so a midweek/end-of-week recap
 # helps). Weekends and listed holidays are fully silent.
 ANCHOR_DAYS = frozenset({2, 4})         # Wed, Fri (0=Mon .. 6=Sun)
+WEEKLY_DAY = 0                          # triage/stale hygiene: Monday morning
 _WEEKDAYS = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
+
+
+def parse_day(spec: str, default: int = 0) -> int:
+    """Single weekday: 'mon' -> 0. Falls back to `default` on a bad token."""
+    return _WEEKDAYS.get(spec.strip().lower()[:3], default)
 
 
 def parse_days(spec: str) -> frozenset[int]:
@@ -136,15 +142,15 @@ def _by_due(rows: list[dict]) -> list[dict]:
     return sorted(rows, key=lambda r: r["due"] or "")
 
 
-def _emit(engine, store, kind: str, dedup_key: str, extra: dict, assignees=None) -> int:
+def _emit(engine, store, kind: str, dedup_key: str, extra: dict, assignees=None, *, day=None) -> int:
     """Build the digest Event, dispatch it, and mark it sent on success."""
-    if store.already_sent(kind, dedup_key):
+    if store.already_sent(kind, dedup_key, day=day):
         log.info("%s [%s]: already sent today", kind, dedup_key)
         return 0
     event = Event(kind=kind, action="digest", assignees=assignees or [], extra=extra)
     result = engine.handle(event)
     if result.get("sent"):
-        store.mark_sent(kind, dedup_key)
+        store.mark_sent(kind, dedup_key, day=day)
         return 1
     log.warning("%s [%s] not delivered: %s", kind, dedup_key, result)
     return 0
@@ -297,8 +303,25 @@ def team(engine, issues: list[dict], store, *, today: dt.date | None = None,
     return 0
 
 
-def triage(engine, issues: list[dict], store) -> int:
-    """Shared room: issues that need a human decision (unassigned / no deadline)."""
+def _weekly_skip(today: dt.date | None, weekly_day: int, holidays) -> tuple[dt.date, bool]:
+    """Hygiene digests run once a week. Return (today, should_skip)."""
+    today = today or _today()
+    skip = today.weekday() != weekly_day or today.isoformat() in holidays
+    return today, skip
+
+
+def triage(engine, issues: list[dict], store, *, today: dt.date | None = None,
+           weekly_day: int = WEEKLY_DAY, holidays=frozenset()) -> int:
+    """Shared room, weekly: issues that need a decision (unassigned / no deadline).
+
+    A full overview (not a delta) — once a week you want the whole hygiene
+    picture, not just what changed. Runs only on `weekly_day` (default Monday).
+    """
+    today, skip = _weekly_skip(today, weekly_day, holidays)
+    if skip:
+        log.info("triage digest: not the weekly day (%s) — skip", today.isoformat())
+        return 0
+
     no_assignee = [_row(i) for i in issues if not (i.get("assignees"))]
     no_due = [_row(i) for i in issues if (i.get("assignees")) and not i.get("due_date")]
 
@@ -311,12 +334,17 @@ def triage(engine, issues: list[dict], store) -> int:
         log.info("triage digest: nothing to report")
         return 0
 
-    return _emit(engine, store, "triage", "group", {"sections": sections})
+    return _emit(engine, store, "triage", "group", {"sections": sections}, day=today.isoformat())
 
 
-def stale(engine, gl, group_id: str, store, days: int = STALE_DAYS) -> int:
-    """Shared room: open issues untouched for `days` days."""
-    cutoff = (_today() - dt.timedelta(days=days))
+def stale(engine, gl, group_id: str, store, days: int = STALE_DAYS, *,
+          today: dt.date | None = None, weekly_day: int = WEEKLY_DAY, holidays=frozenset()) -> int:
+    """Shared room, weekly: open issues untouched for `days` days (full overview)."""
+    today, skip = _weekly_skip(today, weekly_day, holidays)
+    if skip:
+        log.info("stale digest: not the weekly day (%s) — skip", today.isoformat())
+        return 0
+    cutoff = (today - dt.timedelta(days=days))
     issues = gl.group_issues(
         group_id, state="opened", scope="all",
         updated_before=cutoff.isoformat() + "T23:59:59Z",
@@ -325,7 +353,7 @@ def stale(engine, gl, group_id: str, store, days: int = STALE_DAYS) -> int:
     for issue in sorted(issues, key=lambda i: i.get("updated_at", "")):
         row = _row(issue)
         try:
-            row["idle"] = (_today() - _date(issue["updated_at"])).days
+            row["idle"] = (today - _date(issue["updated_at"])).days
         except Exception:                       # noqa: BLE001 — missing/odd timestamp
             row["idle"] = None
         rows.append(row)
@@ -334,7 +362,8 @@ def stale(engine, gl, group_id: str, store, days: int = STALE_DAYS) -> int:
         return 0
 
     return _emit(engine, store, "stale", "group",
-                 {"days": days, "sections": [{"emoji": "🕸", "title": "Без активности", "items": rows}]})
+                 {"days": days, "sections": [{"emoji": "🕸", "title": "Без активности", "items": rows}]},
+                 day=today.isoformat())
 
 
 def _percentile(values: list[int], q: float) -> int | None:

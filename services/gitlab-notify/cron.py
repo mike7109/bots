@@ -90,6 +90,40 @@ def run_overdue(engine, issues: list[dict], store: Store) -> int:
     return sent
 
 
+def run_one(engine, gl, group_id: str, store, name: str, *, force: bool = False) -> int:
+    """Run a single pass by name. Shared by cron.main and the admin "send now".
+
+    force=True overrides the schedule so it fires today (a manual trigger should
+    send regardless of weekday/weekend) — digests then send a full overview.
+    """
+    issues = gl.group_issues(group_id, state="opened", scope="all")
+    sched = engine.settings.schedule()
+    if force:
+        wd = dt.date.today().weekday()
+        ds = dict(anchor_days={wd}, holidays=frozenset(), skip_weekends=False)
+        wk = dict(weekly_day=wd, holidays=frozenset())
+    else:
+        ds = dict(anchor_days=sched["anchor_days"], holidays=sched["holidays"],
+                  skip_weekends=sched["skip_weekends"])
+        wk = dict(weekly_day=sched["weekly_day"], holidays=sched["holidays"])
+    if name == "due":
+        return run_due_soon(engine, issues, store)
+    if name == "overdue":
+        return run_overdue(engine, issues, store)
+    if name == "digest":
+        return digests.personal(engine, issues, store, **ds)
+    if name == "team":
+        return digests.team(engine, issues, store, **ds)
+    if name == "triage":
+        return digests.triage(engine, issues, store, **wk)
+    if name == "stale":
+        return digests.stale(engine, gl, group_id, store,
+                             days=int(env("STALE_DAYS", str(digests.STALE_DAYS))), **wk)
+    if name == "metrics":
+        return digests.metrics(engine, gl, group_id, store)
+    raise ValueError(f"unknown pass: {name}")
+
+
 def main(argv: list[str]) -> None:
     cmd = argv[0] if argv else "all"
     if cmd not in ("all", *PASSES):
@@ -103,25 +137,25 @@ def main(argv: list[str]) -> None:
 
     # Most passes work off the same "all open issues" snapshot — fetch it once.
     issues = gl.group_issues(group_id, state="opened", scope="all")
-    store = Store()
+    store = engine.store                      # shared DB (dedup + settings live together)
+    sched = engine.settings.schedule()        # admin-editable; falls back to env defaults
+    digest_sched = dict(anchor_days=sched["anchor_days"], holidays=sched["holidays"],
+                        skip_weekends=sched["skip_weekends"])
+    weekly = dict(weekly_day=sched["weekly_day"], holidays=sched["holidays"])
     try:
         if "due" in wanted:
             run_due_soon(engine, issues, store)
         if "overdue" in wanted:
             run_overdue(engine, issues, store)
-        schedule = dict(
-            anchor_days=digests.parse_days(env("DIGEST_ANCHOR_DAYS", "wed,fri")),
-            holidays=frozenset(d.strip() for d in env("DIGEST_HOLIDAYS", "").split(",") if d.strip()),
-            skip_weekends=env("DIGEST_SKIP_WEEKENDS", "true").lower() != "false",
-        )
         if "digest" in wanted:
-            digests.personal(engine, issues, store, **schedule)
+            digests.personal(engine, issues, store, **digest_sched)
         if "team" in wanted:
-            digests.team(engine, issues, store, **schedule)
+            digests.team(engine, issues, store, **digest_sched)
         if "triage" in wanted:
-            digests.triage(engine, issues, store)
+            digests.triage(engine, issues, store, **weekly)
         if "stale" in wanted:
-            digests.stale(engine, gl, group_id, store, days=int(env("STALE_DAYS", str(digests.STALE_DAYS))))
+            digests.stale(engine, gl, group_id, store,
+                          days=int(env("STALE_DAYS", str(digests.STALE_DAYS))), **weekly)
         if "metrics" in wanted:
             digests.metrics(engine, gl, group_id, store)
     finally:

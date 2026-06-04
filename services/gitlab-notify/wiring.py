@@ -14,8 +14,22 @@ from botkit.notify.engine import Engine
 from botkit.notify.render import Renderer
 from botkit.notify.transports.matrix import MatrixTransport
 from botkit.notify.transports.matrix_direct import MatrixDirectTransport
+from botkit.store import Store
+
+import digests
+from settings import Settings
 
 HERE = Path(__file__).parent
+
+
+def _schedule_defaults() -> dict:
+    """Seed schedule from env; the admin panel overrides these in the DB."""
+    return {
+        "anchor_days": sorted(digests.parse_days(env("DIGEST_ANCHOR_DAYS", "wed,fri"))),
+        "weekly_day": digests.parse_day(env("DIGEST_WEEKLY_DAY", "mon")),
+        "skip_weekends": env("DIGEST_SKIP_WEEKENDS", "true").lower() != "false",
+        "holidays": [d.strip() for d in env("DIGEST_HOLIDAYS", "").split(",") if d.strip()],
+    }
 
 
 def build_engine() -> Engine:
@@ -35,10 +49,22 @@ def build_engine() -> Engine:
         env("MATRIX_HOMESERVER", required=True),
         env("MATRIX_TOKEN", required=True),
     )
+
+    # Runtime settings (admin panel) live in the state DB and override config.
+    store = Store()
+    settings = Settings(store, defaults=_schedule_defaults())
+
     transports = {
-        "room": MatrixTransport(matrix, identity=identity),        # shared room
-        "dm": MatrixDirectTransport(matrix, identity=identity),    # personal DM (off in config by default)
+        "room": MatrixTransport(matrix, identity=identity),                     # shared room
+        "dm": MatrixDirectTransport(matrix, identity=identity, settings=settings),  # personal DM
     }
     # When email is enabled later:
     #   transports["email"] = EmailTransport(host=env("SMTP_HOST"), ...)
-    return Engine(config, renderer, transports, identity=identity)
+    engine = Engine(config, renderer, transports, identity=identity, settings=settings)
+    # Stash shared handles so app.py (admin) and cron.py reuse one DB/settings/matrix.
+    engine.store = store
+    engine.settings = settings
+    engine.matrix = matrix
+    engine.config = config
+    engine.templates_dir = HERE / "templates"
+    return engine

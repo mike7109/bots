@@ -72,6 +72,23 @@ class MatrixClient:
             self._user_id = resp.json()["user_id"]
         return self._user_id
 
+    def membership(self, room_id: str, user_id: str) -> str | None:
+        """A user's membership in a room: 'join' | 'invite' | 'leave' | None.
+
+        Used to tell "they accepted the DM invite" (join) from "still pending"
+        (invite) so a DM that won't be seen can fall back to the shared room.
+        """
+        room = requests.utils.quote(room_id, safe="")
+        user = requests.utils.quote(user_id, safe="")
+        resp = self._s.get(
+            f"{self.base}/_matrix/client/v3/rooms/{room}/state/m.room.member/{user}",
+            timeout=self.timeout,
+        )
+        if resp.status_code in (403, 404):
+            return None
+        resp.raise_for_status()
+        return resp.json().get("membership")
+
     def _direct_map(self) -> dict:
         """The bot's `m.direct` account data: {user_id: [dm_room_ids]}."""
         me = requests.utils.quote(self.user_id, safe="")

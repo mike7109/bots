@@ -28,12 +28,13 @@ log = logging.getLogger("botkit.notify")
 
 
 class Engine:
-    def __init__(self, config: dict, renderer, transports: dict, identity=None):
+    def __init__(self, config: dict, renderer, transports: dict, identity=None, settings=None):
         self.rules = config.get("rules", [])
         self.defaults = config.get("defaults", {})
         self.renderer = renderer
         self.transports = transports          # {"matrix": MatrixTransport(...), ...}
         self.identity = identity
+        self.settings = settings              # runtime settings (kill switch etc.), optional
 
     def match(self, event: Event) -> dict | None:
         """First rule whose `event:` (and optional `actions:`) matches the event."""
@@ -47,6 +48,10 @@ class Engine:
         return None
 
     def handle(self, event: Event) -> dict:
+        # Global kill switch (admin panel): when off, the bot sends nothing.
+        if self.settings is not None and not self.settings.enabled():
+            return {"ignored": "bot disabled", "kind": event.kind, "action": event.action}
+
         rule = self.match(event)
         if rule is None:
             return {"ignored": "no matching rule", "kind": event.kind, "action": event.action}
