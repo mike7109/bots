@@ -30,12 +30,10 @@ services:
       - "127.0.0.1:8080:8080"
 
 volumes:
-  gitlab-notify-state:                       # persists the cron dedup ledger across runs
+  gitlab-notify-state:                       # persists dedup ledger + runtime settings
 
-# Reminders & digests: run gitlab-notify's cron.py from host cron. `cron.py` with
-# no arg runs the daily set (due/overdue/digest/team/triage/stale); metrics is
-# weekly. Everything dedups via the state volume, so a re-run the same day is a
-# no-op. Examples:
+# Reminders & digests: the always-on service schedules them itself (per-pass
+# days+time in the admin panel), so NO host cron is needed. Manage schedule and
+# trigger one-offs from /admin. To opt out and use host cron instead, set
+# SCHEDULER_ENABLED=false and run e.g.
 #   0 9 * * 1-5  cd /opt/bots/deploy && docker compose run --rm gitlab-notify python cron.py
-#   0 9 * * 1    cd /opt/bots/deploy && docker compose run --rm gitlab-notify python cron.py metrics
-# (`run --rm` reuses the named volume, so dedup state survives between runs.)

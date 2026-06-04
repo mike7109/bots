@@ -99,42 +99,36 @@ HTML = r"""<!doctype html>
   <div class="view" data-v="users">
     <div class="card"><h2>Получатели</h2>
       <p class="hint">Кто получает личные уведомления. «Инвайт» — принял ли человек DM-бота (пока «ждёт» — личка ему не дойдёт, копится). Выключатель — мьют всех его уведомлений. «Пуш»: default — как задумано, loud — всегда с пушем, quiet — тихо (без пуша).</p>
-      <input type="search" id="userSearch" placeholder="Поиск по имени/логину…" oninput="renderUsers()" style="margin-bottom:10px;width:280px">
+      <div class="row" style="margin-top:0">
+        <input type="search" id="userSearch" placeholder="Поиск по имени/логину…" oninput="renderUsers()" style="width:260px">
+        <div class="days" id="userFilters"></div>
+        <span class="spacer"></span><span id="userCount" class="mut"></span>
+      </div>
+      <div style="max-height:420px;overflow:auto;margin-top:8px">
       <table><thead><tr><th>Человек</th><th>MXID</th><th>Инвайт</th><th>Уведомления</th><th>Пуш</th></tr></thead>
       <tbody id="users"></tbody></table>
+      </div>
     </div>
   </div>
 
-  <!-- Расписание -->
+  <!-- Рассылки (расписание + триггеры) -->
   <div class="view" data-v="sched">
-    <div class="card"><h2>Расписание дайджестов</h2>
-      <p class="hint">Якорные дни — в них приходит полный обзор, даже если ничего не менялось; в остальные дни — только изменения. Гигиена (триаж/stale) — раз в неделю. Выходные и праздники — тишина. <b>Детальное расписание по каждой рассылке (дни+время) — в следующем дропе.</b></p>
-      <div class="mut" style="margin-bottom:6px">Якорные дни (полный обзор)</div>
-      <div class="days" id="anchorDays"></div>
-      <div class="row"><span class="mut">День гигиены (триаж/stale):</span><select id="weeklyDay"></select></div>
-      <div class="row"><span class="mut">Тишина по выходным</span>
-        <span class="switch"><input type="checkbox" id="skipWeekends"><span class="slider"></span></span></div>
-      <div class="mut" style="margin:8px 0 4px">Праздники (ISO-даты, по одной в строке)</div>
+    <p class="hint" style="margin:0 0 14px">Каждая рассылка: что делает, когда бот её шлёт (дни + время — планирует сам, host-cron не нужен) и кнопка «запустить сейчас». ⚓ якорные дни — для дайджестов полный обзор вместо «только изменения».</p>
+    <div id="passCards"></div>
+    <div class="card"><h2>Нерабочие дни — тишина</h2>
+      <p class="hint">В нерабочие дни бот молчит. Можно подтянуть производственный календарь РФ автоматически (isdayoff.ru) и/или дописать свои даты.</p>
+      <div class="row"><span class="mut">Авто-праздники РФ (isdayoff.ru)</span>
+        <span class="switch"><input type="checkbox" id="holAuto" onchange="api('/global','POST',{holidays_auto:this.checked}).then(()=>toast('Сохранено'))"><span class="slider"></span></span></div>
+      <div class="mut" style="margin:8px 0 4px">Свои даты (ISO, по одной в строке)</div>
       <textarea id="holidays" placeholder="2026-01-01&#10;2026-05-09"></textarea>
-      <div class="row"><button class="primary" onclick="saveSchedule()">Сохранить</button></div>
-    </div>
-  </div>
-
-  <!-- Рассылки -->
-  <div class="view" data-v="send">
-    <div class="card"><h2>Запустить рассылку сейчас</h2>
-      <p class="hint">Ручной триггер: отправит сразу, минуя расписание (дайджесты — полным обзором). Удобно проверить «как сейчас выглядит» или разослать вне графика.</p>
-      <div class="triggers" id="triggers"></div>
+      <div class="row"><button class="primary" onclick="saveHolidays()">Сохранить даты</button></div>
     </div>
   </div>
 
   <!-- Правила -->
   <div class="view" data-v="rules">
-    <div class="card"><h2>Правила маршрутизации</h2>
-      <p class="hint">Куда уходит каждый тип уведомления. Можно выключить правило или сменить адрес (комната / личка). Событие и шаблон привязаны к коду.</p>
-      <table><thead><tr><th>Вкл</th><th>Событие</th><th>Шаблон</th><th>Куда</th></tr></thead>
-      <tbody id="rules"></tbody></table>
-    </div>
+    <p class="hint" style="margin:0 0 14px">Какие уведомления бот шлёт и куда. Каждое можно выключить или сменить адрес (Комната / Личка). Ниже — живой пример, как выглядит сообщение.</p>
+    <div id="rules"></div>
   </div>
 
   <!-- Шаблоны -->
@@ -180,7 +174,32 @@ HTML = r"""<!doctype html>
 <div id="toast" class="toast"></div>
 <script>
 const DAYS=["Пн","Вт","Ср","Чт","Пт","Сб","Вс"];
-const TABS=[["dash","Дашборд"],["users","Получатели"],["sched","Расписание"],["send","Рассылки"],["rules","Правила"],["tpl","Шаблоны"],["logs","Логи"]];
+const TABS=[["dash","Дашборд"],["users","Получатели"],["sched","Рассылки"],["rules","Правила"],["tpl","Шаблоны"],["logs","Логи"]];
+const PASS_INFO={
+  due:{icon:'📅',title:'Дедлайн завтра',desc:'Напоминание в общую комнату об issue, у которых срок наступает завтра.'},
+  overdue:{icon:'⏰',title:'Просрочки',desc:'Личное напоминание исполнителю об его issue с прошедшим сроком.'},
+  digest:{icon:'📋',title:'Личный дайджест «Задачи на сегодня»',desc:'Каждому в личку его задачи. В якорные дни — полный обзор, в остальные — только изменения со вчера.'},
+  team:{icon:'🗓',title:'Сводка команды',desc:'Обзор задач команды в общую комнату: просрочено / сегодня / ближайшие / в работе.'},
+  triage:{icon:'🧹',title:'Триаж',desc:'Что требует внимания: без исполнителя или без срока. Обычно раз в неделю.'},
+  stale:{icon:'🕸',title:'Зависшие задачи',desc:'Открытые issue без активности ≥ N дней (STALE_DAYS). Обычно раз в неделю.'},
+  metrics:{icon:'📊',title:'Метрики потока',desc:'Еженедельный снимок: закрыто / в работе (WIP) / возраст / cycle time p85.'},
+};
+let UF='all';
+// Человеческие названия и описания вместо технических кодов событий.
+const KIND={
+  issue:{t:'Открытие / закрытие issue',d:'Issue открыли, закрыли или переоткрыли (вебхук) → в общую комнату.'},
+  due_soon:{t:'Дедлайн завтра',d:'У issue срок наступает завтра → в общую комнату.'},
+  overdue:{t:'Просрочка',d:'Срок задачи уже прошёл → в личку исполнителю.'},
+  digest_personal:{t:'Личный дайджест',d:'Личные задачи человеку «что на тебе» → в личку.'},
+  digest_team:{t:'Сводка команды',d:'Обзор задач всей команды → в общую комнату.'},
+  triage:{t:'Триаж',d:'Задачи без исполнителя или без срока → в общую комнату.'},
+  stale:{t:'Зависшие',d:'Открытые задачи без активности N дней → в общую комнату.'},
+  metrics:{t:'Метрики потока',d:'Еженедельный снимок метрик → в общую комнату.'},
+};
+const DEST={room:'Комната',dm:'Личка'};
+const PUSHL={default:'Как задумано',loud:'Всегда пуш',quiet:'Тихо (без пуша)'};
+function kindTitle(k){return (KIND[k]||{}).t||k;}
+function kindDesc(k){return (KIND[k]||{}).d||'';}
 let S=null;
 const $=id=>document.getElementById(id);
 function esc(x){return String(x==null?'':x).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
@@ -215,12 +234,11 @@ async function load(){
   $('statusPill').textContent=s.enabled?'РАБОТАЕТ':'ВЫКЛЮЧЕН';
   $('killSwitch').checked=s.enabled;
   renderStats(s.stats);
+  renderUserFilters();
   renderUsers();
-  $('anchorDays').innerHTML=DAYS.map((d,i)=>`<span class="day ${s.schedule.anchor_days.includes(i)?'sel':''}" data-d="${i}" onclick="this.classList.toggle('sel')">${d}</span>`).join('');
-  $('weeklyDay').innerHTML=DAYS.map((d,i)=>`<option value="${i}" ${s.schedule.weekly_day===i?'selected':''}>${d}</option>`).join('');
-  $('skipWeekends').checked=s.schedule.skip_weekends;
+  renderPasses();
+  $('holAuto').checked=s.schedule.holidays_auto;
   $('holidays').value=(s.schedule.holidays||[]).join('\n');
-  $('triggers').innerHTML=s.passes.map(p=>`<button class="sm" onclick="trigger('${p}',this)">▶ ${p}</button>`).join('');
   renderRules();
   $('tplSelect').innerHTML=s.templates.map(t=>`<option>${esc(t)}</option>`).join('');
   loadTpl();
@@ -234,40 +252,88 @@ function renderStats(st){
     <div class="stat"><div class="n">${s(w,'skipped')}</div><div class="l">пропущено (нед.)</div></div>
     <div class="stat ${s(w,'error')?'bad':''}"><div class="n">${s(w,'error')}</div><div class="l">ошибок (нед.)</div></div>`;
   const bk=st.by_kind||{};const keys=Object.keys(bk);
-  $('byKind').innerHTML=keys.length?('<span class="mut" style="font-size:12px">По типам за неделю: </span>'+keys.map(k=>`<span class="tag">${esc(k)}: ${bk[k]}</span>`).join('')):'<span class="mut" style="font-size:12px">Отправок за неделю пока нет.</span>';
+  $('byKind').innerHTML=keys.length?('<span class="mut" style="font-size:12px">По типам за неделю: </span>'+keys.map(k=>`<span class="tag">${esc(kindTitle(k))}: ${bk[k]}</span>`).join('')):'<span class="mut" style="font-size:12px">Отправок за неделю пока нет.</span>';
+}
+const UFILTERS=[['all','Все'],['accepted','Принял'],['pending','Ждёт'],['none','Нет DM'],['muted','Замьючен']];
+function renderUserFilters(){
+  $('userFilters').innerHTML=UFILTERS.map(([k,l])=>`<span class="day ${UF===k?'sel':''}" onclick="UF='${k}';renderUserFilters();renderUsers()">${l}</span>`).join('');
+}
+function matchFilter(u){
+  if(UF==='muted')return u.muted;
+  if(UF==='all')return true;
+  return u.invite===UF;
 }
 function renderUsers(){
   const q=($('userSearch').value||'').toLowerCase();
-  const rows=Object.entries(S.users).filter(([l,u])=>!q||l.toLowerCase().includes(q)||(u.name||'').toLowerCase().includes(q));
+  const rows=Object.entries(S.users).filter(([l,u])=>matchFilter(u)&&(!q||l.toLowerCase().includes(q)||(u.name||'').toLowerCase().includes(q)));
+  $('userCount').textContent=rows.length+' из '+Object.keys(S.users).length;
   $('users').innerHTML=rows.map(([login,u])=>`
     <tr><td><b>${esc(u.name)}</b><div class="mut mono">${esc(login)}</div></td>
     <td class="mono mut">${esc(u.mxid||'—')}</td>
     <td><span class="pill ${u.invite}">${({accepted:'✅ принял',pending:'⏳ ждёт',none:'— нет DM'})[u.invite]}</span></td>
     <td><span class="switch"><input type="checkbox" ${u.muted?'':'checked'} onchange="setUser('${login}',{muted:!this.checked})"><span class="slider"></span></span></td>
-    <td><select onchange="setUser('${login}',{push:this.value})">${S.push_modes.map(m=>`<option ${u.push===m?'selected':''}>${m}</option>`).join('')}</select></td></tr>`).join('')
+    <td><select onchange="setUser('${login}',{push:this.value})">${S.push_modes.map(m=>`<option value="${m}" ${u.push===m?'selected':''}>${PUSHL[m]||m}</option>`).join('')}</select></td></tr>`).join('')
     ||'<tr><td colspan=5 class="mut">Никого не найдено.</td></tr>';
 }
 function renderRules(){
-  $('rules').innerHTML=S.rules.map(r=>`<tr>
-    <td><span class="switch"><input type="checkbox" ${r.enabled?'checked':''} onchange="setRule('${r.event}',{enabled:this.checked})"><span class="slider"></span></span></td>
-    <td><b>${esc(r.event)}</b>${r.actions?' <span class="mut mono">'+esc(r.actions.join(','))+'</span>':''}</td>
-    <td class="mono">${esc(r.template)}</td>
-    <td>${['room','dm'].map(d=>`<label class="tag" style="cursor:pointer"><input type="checkbox" ${r.to.includes(d)?'checked':''} onchange="toggleDest('${r.event}','${d}',this.checked)"> ${d}</label>`).join('')}</td></tr>`).join('');
+  $('rules').innerHTML=S.rules.map(r=>`<div class="card" style="padding:14px">
+    <div class="row" style="margin:0"><div style="font-size:15px"><b>${esc(kindTitle(r.event))}</b> <span class="mut mono" style="font-size:11px">${esc(r.event)}</span>${r.enabled?'':' <span class="badge ignored">выключено</span>'}</div>
+      <span class="spacer"></span>
+      <label class="row" style="margin:0;gap:6px"><span class="mut" style="font-size:12px">вкл</span><span class="switch"><input type="checkbox" ${r.enabled?'checked':''} onchange="setRule('${r.event}',{enabled:this.checked})"><span class="slider"></span></span></label></div>
+    <p class="hint" style="margin:6px 0 10px">${esc(kindDesc(r.event))}</p>
+    <div class="row" style="margin:0"><span class="mut">Куда слать:</span>
+      ${['room','dm'].map(d=>`<label class="tag" style="cursor:pointer;padding:3px 9px"><input type="checkbox" ${r.to.includes(d)?'checked':''} onchange="toggleDest('${r.event}','${d}',this.checked)"> ${DEST[d]}</label>`).join('')}
+      <span class="spacer"></span><button class="sm" onclick="toggleExample('${r.event}','${r.template}',this)">👁 пример</button></div>
+    <div class="bubble exmpl hide" id="ex_${r.event}" style="margin-top:10px"></div></div>`).join('');
+}
+async function toggleExample(ev,tpl,btn){
+  const box=$('ex_'+ev);
+  if(!box.classList.contains('hide')){box.classList.add('hide');return;}
+  box.classList.remove('hide');box.innerHTML='<span class="mut">загрузка…</span>';
+  const r=await api('/example?template='+encodeURIComponent(tpl));
+  box.innerHTML=r.ok?r.html:'<span class="err">'+esc(r.error||'ошибка')+'</span>';
 }
 $('killSwitch').addEventListener('change',async e=>{await api('/global','POST',{enabled:e.target.checked});toast(e.target.checked?'Бот включён':'Бот выключен');load();});
 async function setUser(login,patch){await api('/user/'+login,'POST',patch);toast('Сохранено: '+login);}
 async function setRule(ev,patch){await api('/rule/'+ev,'POST',patch);toast('Правило: '+ev);load();}
 function toggleDest(ev,d,on){const r=S.rules.find(x=>x.event===ev);let to=r.to.slice();if(on){if(!to.includes(d))to.push(d);}else{to=to.filter(x=>x!==d);}setRule(ev,{to});}
-async function saveSchedule(){
-  const anchor=[...document.querySelectorAll('#anchorDays .day.sel')].map(e=>+e.dataset.d);
-  const holidays=$('holidays').value.split('\n').map(s=>s.trim()).filter(Boolean);
-  await api('/global','POST',{anchor_days:anchor,weekly_day:+$('weeklyDay').value,skip_weekends:$('skipWeekends').checked,holidays});
-  toast('Расписание сохранено');load();
+function miniDays(sel,prefix){return DAYS.map((d,i)=>`<span class="day ${sel.includes(i)?'sel':''}" style="padding:3px 7px;font-size:12px" data-${prefix}="${i}" onclick="this.classList.toggle('sel')">${d}</span>`).join('');}
+function renderPasses(){
+  $('passCards').innerHTML=S.passes.map(p=>{
+    const c=S.pass_schedules[p]||{};const hasA=S.has_anchor.includes(p);const info=PASS_INFO[p]||{icon:'•',title:p,desc:''};
+    return `<div class="card" data-p="${p}">
+      <div class="row" style="margin:0"><div style="font-size:15px"><b>${info.icon} ${esc(info.title)}</b> <span class="mut mono" style="font-size:11px">${esc(p)}</span></div>
+        <span class="spacer"></span>
+        <label class="row" style="margin:0;gap:6px"><span class="mut" style="font-size:12px">вкл</span><span class="switch"><input type="checkbox" class="pEn" ${c.enabled?'checked':''}><span class="slider"></span></span></label>
+        <button class="sm" onclick="trigger('${p}',this)">▶ Запустить сейчас</button></div>
+      <p class="hint" style="margin:6px 0 12px">${esc(info.desc)}</p>
+      <div class="row" style="margin:0"><span class="mut">Дни:</span><div class="days pDays">${miniDays(c.days||[],'d')}</div>
+        <span class="mut" style="margin-left:8px">Время:</span><input type="time" class="pTime" value="${esc(c.time||'09:00')}">
+        ${hasA?`<span class="mut" style="margin-left:8px" title="полный обзор вместо «только изменения»">⚓ Якорь:</span><div class="days pAnchor">${miniDays(c.anchor_days||[],'a')}</div>`:''}
+        <span class="spacer"></span><button class="primary sm" onclick="savePass('${p}',this)">Сохранить</button></div>
+      <div class="pResult" style="margin-top:8px;font-size:13px"></div></div>`;
+  }).join('');
 }
-async function trigger(name,btn){btn.disabled=true;const o=btn.textContent;btn.textContent='⏳ '+name;
+async function savePass(p,btn){
+  const card=btn.closest('.card');
+  const body={enabled:card.querySelector('.pEn').checked,
+    days:[...card.querySelectorAll('.pDays .day.sel')].map(e=>+e.dataset.d),
+    time:card.querySelector('.pTime').value};
+  const a=card.querySelector('.pAnchor');if(a)body.anchor_days=[...a.querySelectorAll('.day.sel')].map(e=>+e.dataset.a);
+  await api('/pass/'+p,'POST',body);toast('Расписание «'+p+'» сохранено');
+}
+async function saveHolidays(){
+  const holidays=$('holidays').value.split('\n').map(s=>s.trim()).filter(Boolean);
+  await api('/global','POST',{holidays});toast('Даты сохранены');
+}
+async function trigger(name,btn){
+  const card=btn.closest('.card');const res=card?card.querySelector('.pResult'):null;
+  btn.disabled=true;const o=btn.textContent;btn.textContent='⏳ запуск…';
+  if(res){res.style.color='var(--mut)';res.textContent='Запускаю…';}
   try{const r=await api('/trigger/'+name,'POST');
-    if(r.ok)toast(`«${name}»: отправлено ${r.sent}`);else toast('Ошибка: '+(r.error||''),true);
-  }catch(e){toast('Ошибка',true);}
+    if(r.ok){const m=`✓ отправлено получателям: ${r.sent}`;toast(`«${name}»: отправлено ${r.sent}`);if(res){res.style.color='var(--ok)';res.textContent=m;}}
+    else{const m='✗ ошибка: '+(r.error||'неизвестно');toast('Ошибка триггера',true);if(res){res.style.color='var(--bad)';res.textContent=m;}}
+  }catch(e){if(res){res.style.color='var(--bad)';res.textContent='✗ '+e;}toast('Ошибка',true);}
   btn.disabled=false;btn.textContent=o;
 }
 async function loadTpl(){const name=$('tplSelect').value;if(!name)return;const r=await api('/template?name='+encodeURIComponent(name));$('tplBody').value=r.content;previewTpl();}
@@ -282,9 +348,9 @@ async function saveTpl(){const r=await api('/template','POST',{name:$('tplSelect
 async function loadLogs(){const f=$('logFilter').value;const r=await api('/logs?limit=150'+(f?'&status='+f:''));
   $('logs').innerHTML=(r.rows||[]).map(x=>`<tr class="${x.status==='error'?'logerr':''}">
     <td class="mono mut">${esc((x.ts||'').replace('T',' ').slice(5,16))}</td>
-    <td><b>${esc(x.kind||'')}</b> <span class="mut">${esc(x.action||'')}</span></td>
-    <td><span class="badge ${x.status}">${esc(x.status)}</span></td>
-    <td class="mono">${esc(x.channel||'')}</td>
+    <td><b>${esc(kindTitle(x.kind))}</b></td>
+    <td><span class="badge ${x.status}">${esc(({sent:'отправлено',skipped:'пропущено',error:'ошибка',ignored:'не слалось'})[x.status]||x.status)}</span></td>
+    <td>${(x.channel||'').split(',').filter(Boolean).map(d=>DEST[d]||d).join(', ')||'—'}</td>
     <td class="mut">${esc(x.detail||'')}</td></tr>`).join('')||'<tr><td colspan=5 class="mut">Пусто.</td></tr>';
 }
 load();

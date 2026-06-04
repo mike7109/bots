@@ -90,22 +90,19 @@ def run_overdue(engine, issues: list[dict], store: Store) -> int:
     return sent
 
 
-def run_one(engine, gl, group_id: str, store, name: str, *, force: bool = False) -> int:
-    """Run a single pass by name. Shared by cron.main and the admin "send now".
+def run_one(engine, gl, group_id: str, store, name: str, *,
+            force: bool = False, anchor: bool = False) -> int:
+    """Run a single pass by name. Shared by the scheduler and the admin "send now".
 
-    force=True overrides the schedule so it fires today (a manual trigger should
-    send regardless of weekday/weekend) — digests then send a full overview.
+    The caller decides timing, so the pass just runs: `force` (manual trigger) or
+    `anchor` (scheduled anchor day) -> digests send a full overview; otherwise a
+    delta. triage/stale always run when called.
     """
     issues = gl.group_issues(group_id, state="opened", scope="all")
-    sched = engine.settings.schedule()
-    if force:
-        wd = dt.date.today().weekday()
-        ds = dict(anchor_days={wd}, holidays=frozenset(), skip_weekends=False)
-        wk = dict(weekly_day=wd, holidays=frozenset())
-    else:
-        ds = dict(anchor_days=sched["anchor_days"], holidays=sched["holidays"],
-                  skip_weekends=sched["skip_weekends"])
-        wk = dict(weekly_day=sched["weekly_day"], holidays=sched["holidays"])
+    wd = dt.date.today().weekday()
+    full = force or anchor
+    ds = dict(anchor_days={wd} if full else set(), holidays=frozenset(), skip_weekends=False)
+    wk = dict(weekly_day=wd, holidays=frozenset())
     if name == "due":
         return run_due_soon(engine, issues, store)
     if name == "overdue":

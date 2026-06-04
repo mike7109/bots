@@ -22,7 +22,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 
 from botkit.config import env
 from botkit.gitlab import GitLabClient
-from settings import PUSH_MODES, weekday_names
+from settings import PUSH_MODES, HAS_ANCHOR, weekday_names
 from admin_html import HTML as _HTML
 import cron
 
@@ -155,7 +155,10 @@ def create_admin_router(engine) -> APIRouter:
                 "weekly_day": g["weekly_day"],
                 "skip_weekends": g["skip_weekends"],
                 "holidays": g["holidays"],
+                "holidays_auto": g.get("holidays_auto", False),
             },
+            "pass_schedules": settings.all_pass_schedules(),
+            "has_anchor": list(HAS_ANCHOR),
             "users": users,
             "rules": rules,
             "templates": templates,
@@ -168,8 +171,25 @@ def create_admin_router(engine) -> APIRouter:
     async def set_global(request: Request, admin_session: str | None = Cookie(default=None)):
         _guard(admin_session)
         patch = await request.json()
-        allowed = {"enabled", "anchor_days", "weekly_day", "skip_weekends", "holidays"}
+        allowed = {"enabled", "anchor_days", "weekly_day", "skip_weekends", "holidays", "holidays_auto"}
         return settings.update_global({k: v for k, v in patch.items() if k in allowed})
+
+    @router.post("/api/pass/{name}")
+    async def set_pass(name: str, request: Request, admin_session: str | None = Cookie(default=None)):
+        _guard(admin_session)
+        if name not in cron.PASSES:
+            raise HTTPException(status_code=400, detail="unknown pass")
+        body = await request.json()
+        clean = {}
+        if "enabled" in body:
+            clean["enabled"] = bool(body["enabled"])
+        if "days" in body and isinstance(body["days"], list):
+            clean["days"] = sorted({int(d) for d in body["days"] if 0 <= int(d) <= 6})
+        if "anchor_days" in body and isinstance(body["anchor_days"], list):
+            clean["anchor_days"] = sorted({int(d) for d in body["anchor_days"] if 0 <= int(d) <= 6})
+        if "time" in body and isinstance(body["time"], str) and len(body["time"]) == 5:
+            clean["time"] = body["time"]
+        return settings.update_pass(name, clean)
 
     @router.post("/api/user/{login}")
     async def set_user(login: str, request: Request, admin_session: str | None = Cookie(default=None)):
@@ -211,6 +231,14 @@ def create_admin_router(engine) -> APIRouter:
         _guard(admin_session)
         return {"rows": settings.store.recent_log(min(limit, 500), status),
                 "stats": settings.store.log_stats(7)}
+
+    @router.get("/api/example")
+    def example(template: str, admin_session: str | None = Cookie(default=None)):
+        _guard(admin_session)
+        try:
+            return {"ok": True, "html": engine.renderer.render(template, "matrix", SAMPLE_CTX)}
+        except Exception as e:                       # noqa: BLE001
+            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
     @router.post("/api/template/preview")
     async def preview(request: Request, admin_session: str | None = Cookie(default=None)):
