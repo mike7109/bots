@@ -10,6 +10,7 @@ from fastapi import FastAPI, Header, Request
 
 from botkit.config import env
 from botkit.webhook import verify_token
+from admin import create_admin_router
 from normalize import normalize
 from wiring import build_engine
 
@@ -22,6 +23,8 @@ SECRET = env("WEBHOOK_SECRET", required=True)
 engine = build_engine()
 
 app = FastAPI(title="gitlab-notify")
+# Web admin panel at /admin (gated by env ADMIN_PASSWORD; disabled if unset).
+app.include_router(create_admin_router(engine))
 
 
 @app.get("/healthz")

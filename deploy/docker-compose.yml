@@ -17,8 +17,9 @@ services:
       - "127.0.0.1:8081:8080"
     volumes:
       - ../services/gitlab-notify/config.yaml:/app/svc/config.yaml:ro
-      - ../services/gitlab-notify/templates:/app/svc/templates:ro
-      - gitlab-notify-state:/data            # SQLite dedup ledger (STATE_DB=/data/state.db)
+      - ../services/gitlab-notify/templates:/app/svc/templates   # rw: admin panel edits templates
+      - gitlab-notify-state:/data            # SQLite: dedup ledger + runtime settings (STATE_DB=/data/state.db)
+    # Web admin panel at http://127.0.0.1:8081/admin (set ADMIN_PASSWORD in the env file).
 
   gitlab-expand-tasks:
     image: ghcr.io/mike7109/gitlab-expand-tasks:latest
