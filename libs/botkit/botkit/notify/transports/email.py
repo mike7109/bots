@@ -8,7 +8,8 @@ from __future__ import annotations
 
 
 class EmailTransport:
-    name = "email"
+    name = "email"       # destination key used in a rule's `to:`
+    medium = "email"     # template variant: <template>.email.html.j2
 
     def __init__(self, **smtp_config):
         self.smtp = smtp_config

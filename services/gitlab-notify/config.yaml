@@ -1,16 +1,16 @@
-# gitlab-notify — what to send, to whom, where. Edit this (and templates/)
-# without rebuilding the image: it's mounted as a volume in docker-compose.
+# gitlab-notify — notification types and where they go. Edit this (and
+# templates/) without rebuilding the image: it's mounted as a volume.
 #
-# Secrets are NOT here — homeserver/token/webhook secret come from env (.env).
+# Secrets and the host-specific room id live in .env. The shared room id comes
+# from env MATRIX_ROOM (preferred) and overrides defaults.room_id below, so this
+# file stays generic and never diverges per server.
 
-# Fallback channel + room used by any rule that doesn't override them.
 defaults:
-  channels: [matrix]
-  matrix:
-    room: "!hnt04WMG..."          # <-- the "🔔 GitLab — infra" room id (no :fakspro.ru)
+  to: [room]                       # default destination(s) if a rule omits `to:`
+  room_id: "!SET_VIA_MATRIX_ROOM"  # overridden by env MATRIX_ROOM (no :fakspro.ru suffix)
 
-# GitLab login -> Matrix mxid / display name / email. Used for live @-pings and
-# (later) email recipients. matrix_domain is the fallback when `matrix:` is absent.
+# gitlab login -> Matrix mxid / display name / email. Used for @-pings and
+# (later) email/DM recipients. matrix_domain is the fallback (@<login>:<domain>).
 matrix_domain: fakspro.ru
 users:
   m.bahmutskij: { matrix: "@m.bahmutskij:fakspro.ru", name: "Михаил Бахмутский" }
@@ -20,20 +20,29 @@ users:
   s.staritsyn:  { matrix: "@s.staritsyn:fakspro.ru",  name: "Старицин Сергей" }
   d.tronin:     { matrix: "@d.tronin:fakspro.ru",     name: "Тронин Дмитрий" }
 
-# Event kind -> template + behaviour. First matching rule wins.
+# Each rule = a notification type with its parameters:
+#   event / actions  trigger
+#   template         look (templates/<template>.matrix.html.j2)
+#   to               destination(s): room | dm   (dm = personal direct message)
+#   mention          who gets pinged (assignee)
 # NB: the key is `event:` (not `on:`) — YAML reads a bare `on` as boolean True.
 rules:
   - event: issue                   # webhook: issue opened/closed/reopened
     actions: [open, close, reopen]
     template: issue
+    to: [room]
     mention: assignee
 
-  - event: task                    # cron-sourced (GitLab 17.6 doesn't webhook tasks)
-    actions: [open, close, reopen]
-    template: issue
-    mention: assignee
-
-  - event: due_soon                # cron: due date is tomorrow
+  - event: due_soon                # cron: due tomorrow -> shared room
     template: due_soon
+    to: [room]
     mention: assignee
-    # channels: [matrix, email]    # <-- enable email later, one line, no code change
+
+  # --- Personal DMs are OFF for now ------------------------------------------
+  # The capability exists (transport `dm`, template overdue). To turn on overdue
+  # reminders in private messages, uncomment this rule. The person accepts the
+  # bot's DM invite once, then it's silent.
+  # - event: overdue               # cron: due date already passed -> personal DM
+  #   template: overdue
+  #   to: [dm]
+  #   mention: assignee

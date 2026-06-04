@@ -26,6 +26,7 @@ class MatrixClient:
         self.timeout = timeout
         self._s = requests.Session()
         self._s.headers["Authorization"] = f"Bearer {token}"
+        self._user_id: str | None = None
 
     def send_html(
         self,
@@ -58,3 +59,54 @@ class MatrixClient:
         resp = self._s.put(url, json=content, timeout=self.timeout)
         resp.raise_for_status()
         return resp.json().get("event_id")
+
+    # --- direct messages -------------------------------------------------
+    @property
+    def user_id(self) -> str:
+        """The bot's own mxid (cached). Needed to read/write its account data."""
+        if self._user_id is None:
+            resp = self._s.get(
+                f"{self.base}/_matrix/client/v3/account/whoami", timeout=self.timeout
+            )
+            resp.raise_for_status()
+            self._user_id = resp.json()["user_id"]
+        return self._user_id
+
+    def _direct_map(self) -> dict:
+        """The bot's `m.direct` account data: {user_id: [dm_room_ids]}."""
+        me = requests.utils.quote(self.user_id, safe="")
+        url = f"{self.base}/_matrix/client/v3/user/{me}/account_data/m.direct"
+        resp = self._s.get(url, timeout=self.timeout)
+        if resp.status_code == 404:
+            return {}
+        resp.raise_for_status()
+        return resp.json()
+
+    def get_or_create_dm(self, user_id: str) -> str:
+        """Return a 1:1 room with `user_id`, reusing an existing DM if there is
+        one (tracked in m.direct), else creating it and inviting them.
+
+        First message arrives as a DM invite the person accepts once; after
+        that the room is reused silently.
+        """
+        direct = self._direct_map()
+        existing = direct.get(user_id) or []
+        if existing:
+            return existing[0]
+
+        resp = self._s.post(
+            f"{self.base}/_matrix/client/v3/createRoom",
+            json={"preset": "trusted_private_chat", "is_direct": True, "invite": [user_id]},
+            timeout=self.timeout,
+        )
+        resp.raise_for_status()
+        room_id = resp.json()["room_id"]
+
+        direct.setdefault(user_id, []).append(room_id)
+        me = requests.utils.quote(self.user_id, safe="")
+        self._s.put(
+            f"{self.base}/_matrix/client/v3/user/{me}/account_data/m.direct",
+            json=direct,
+            timeout=self.timeout,
+        ).raise_for_status()
+        return room_id

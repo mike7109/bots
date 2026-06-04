@@ -5,17 +5,17 @@ from botkit.matrix import MatrixClient
 
 
 class MatrixTransport:
-    name = "matrix"
+    name = "room"        # destination key used in a rule's `to:`
+    medium = "matrix"    # template variant: <template>.matrix.html.j2
 
     def __init__(self, client: MatrixClient, identity=None):
         self.client = client
         self.identity = identity
 
     def dispatch(self, event, rule: dict, rendered: str, defaults: dict) -> dict:
-        room = (rule.get("matrix") or {}).get("room") \
-            or (defaults.get("matrix") or {}).get("room")
+        room = rule.get("room_id") or defaults.get("room_id")
         if not room:
-            raise RuntimeError("matrix transport: no room configured (rule.matrix.room / defaults.matrix.room)")
+            raise RuntimeError("room transport: no room_id (set env MATRIX_ROOM or defaults.room_id)")
 
         # `mention: assignee` in the rule => actually ping that person.
         mentions: list[str] = []

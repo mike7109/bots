@@ -1,16 +1,21 @@
-"""Rules engine: match an Event to a rule, render it, dispatch to transports.
+"""Rules engine: match an Event to a rule, render it, dispatch to destinations.
 
-All behaviour lives in config, not here:
+A rule IS a notification type with its parameters. All behaviour lives in
+config, not here:
 
     defaults:
-      channels: [matrix]
-      matrix: { room: "!abc..." }
+      to: [room]                 # default destination(s)
+      room_id: "!abc..."         # the shared room (env MATRIX_ROOM overrides)
     rules:
-      - event: issue                 # NB: keep this key `event`, not `on` —
-        actions: [open, close, reopen]  # YAML parses a bare `on:` key as the
-        template: issue                 # boolean True (the "Norway problem").
-        mention: assignee
-        # channels: [matrix, email]   # override per rule
+      - event: issue             # trigger (NB: key is `event`, not `on` — YAML
+        actions: [open, close, reopen]   # reads a bare `on:` as boolean True)
+        template: issue          # how it looks
+        to: [room]               # where it goes: room | dm | email (or several)
+        mention: assignee        # who gets pinged
+
+A destination ("room"/"dm"/"email") maps to a transport; the transport's
+`medium` ("matrix"/"email") picks the template variant `<template>.<medium>.html.j2`.
+So room and dm share the same matrix template — they only differ in delivery.
 """
 from __future__ import annotations
 
@@ -46,17 +51,18 @@ class Engine:
         if rule is None:
             return {"ignored": "no matching rule", "kind": event.kind, "action": event.action}
 
-        channels = rule.get("channels") or self.defaults.get("channels", ["matrix"])
+        destinations = rule.get("to") or self.defaults.get("to", ["room"])
         ctx = asdict(event)
         sent, skipped = [], []
-        for channel in channels:
-            transport = self.transports.get(channel)
+        for dest in destinations:
+            transport = self.transports.get(dest)
             if transport is None:
-                skipped.append(channel)
+                skipped.append(dest)
                 continue
-            rendered = self.renderer.render(rule["template"], channel, ctx)
+            medium = getattr(transport, "medium", "matrix")
+            rendered = self.renderer.render(rule["template"], medium, ctx)
             transport.dispatch(event, rule, rendered, self.defaults)
-            sent.append(channel)
+            sent.append(dest)
 
         log.info("handled %s/%s -> %s", event.kind, event.action, sent)
         result = {"sent": sent}
