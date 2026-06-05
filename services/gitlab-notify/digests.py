@@ -208,6 +208,102 @@ def _render(engine, event: Event) -> str | None:
         return None
 
 
+# --- per-issue reminders (due-soon / overdue) ----------------------------
+# These two passes share `_remind` (filter -> per-day dedup -> handle -> mark).
+# They live here (not cron.py) so the pass registry can import a single module.
+def _event(issue: dict, *, kind: str, action: str, room=None) -> Event:
+    """Build a single-issue Event from a GitLab REST issue object."""
+    assignees = [a.get("username") for a in (issue.get("assignees") or []) if a.get("username")]
+    return Event(
+        kind=kind,
+        action=action,
+        project=(issue.get("references") or {}).get("full", "").rsplit("#", 1)[0],
+        iid=str(issue.get("iid", "")),
+        title=issue.get("title", ""),
+        url=issue.get("web_url", ""),
+        state=issue.get("state", ""),
+        labels=issue.get("labels", []),
+        assignees=assignees,
+        due=issue.get("due_date"),
+        room=room,
+    )
+
+
+def _remind(engine, issues: list[dict], store, *, kind: str, action: str,
+            due_predicate, room=None, skey: str = "", warn_undelivered: bool = False,
+            commit: bool = True, dry: bool = False):
+    """Filter -> per-day dedup -> handle -> mark loop, shared by the reminders.
+
+    `due_predicate(due)` selects which issues to remind on (due-tomorrow for the
+    soon pass, past-due for overdue). The dedup key is the global issue id
+    namespaced by source (`keys.ns`), so a second run the same day is a no-op and
+    two groups sharing an id don't collide. `warn_undelivered` logs each issue
+    the engine failed to deliver (overdue only, matching the original).
+
+    `commit=False` (manual) ignores the per-issue dedup and never marks sent, so
+    a manual run re-sends every matching item statelessly. `dry=True` renders a
+    sample for the first matching issue without dispatching. Returns
+    `(sent, recipients, sample_html)`: `recipients` is the per-issue assignee
+    logins (dm passes) or the room (room passes).
+    """
+    sent = 0
+    recipients: list[str] = []
+    sample_html = None
+    room_pass = action == "due"                 # due_soon -> room; overdue -> dm
+    for issue in issues:
+        if not due_predicate(issue.get("due_date")):
+            continue
+        key = keys.ns(skey, issue.get("id"))   # global issue id — stable across renames
+        if commit and store.already_sent(kind, key):
+            continue
+        event = _event(issue, kind=kind, action=action, room=room)
+        if sample_html is None:
+            sample_html = _render(engine, event)
+        if room_pass:
+            for r in _room_recipients(room):
+                if r not in recipients:
+                    recipients.append(r)
+        else:
+            for login in event.assignees:
+                if login not in recipients:
+                    recipients.append(login)
+        if dry:
+            continue
+        result = engine.handle(event)
+        if result.get("sent"):
+            if commit:
+                store.mark_sent(kind, key)
+            sent += 1
+        elif warn_undelivered:
+            log.warning("overdue #%s not delivered: %s", issue.get("iid"), result)
+    return sent, recipients, sample_html
+
+
+def run_due_soon(engine, issues: list[dict], store, *, room=None, skey: str = "",
+                 commit: bool = True, dry: bool = False) -> dict:
+    tomorrow = (dt.date.today() + dt.timedelta(days=1)).isoformat()
+    sent, recipients, html = _remind(
+        engine, issues, store, kind=keys.DUE_SOON, action="due",
+        due_predicate=lambda due: due == tomorrow, room=room, skey=skey,
+        commit=commit, dry=dry)
+    log.info("due tomorrow (%s): %d reminder(s) sent", tomorrow, sent)
+    reason = "ok" if (sent or (dry and recipients)) else "empty"
+    return _result(sent, reason, recipients, html=html)
+
+
+def run_overdue(engine, issues: list[dict], store, *, room=None, skey: str = "",
+                commit: bool = True, dry: bool = False) -> dict:
+    """Open issues whose due_date is already in the past -> DM, once per day."""
+    today = dt.date.today().isoformat()
+    sent, recipients, html = _remind(
+        engine, issues, store, kind=keys.OVERDUE, action="overdue",
+        due_predicate=lambda due: bool(due) and due < today,
+        room=room, skey=skey, warn_undelivered=True, commit=commit, dry=dry)
+    log.info("overdue (before %s): %d reminder(s) sent", today, sent)
+    reason = "ok" if (sent or (dry and recipients)) else "empty"
+    return _result(sent, reason, recipients, html=html)
+
+
 # --- passes --------------------------------------------------------------
 def _full_sections(rows: list[dict], today: str, horizon: str) -> list[dict]:
     """The grouped-by-deadline view used for the anchor-day overview."""

@@ -34,6 +34,7 @@ from admin_html import HTML as _HTML
 import auth
 import cron
 import keys
+import passes
 
 log = logging.getLogger("gitlab-notify.admin")
 COOKIE = "admin_session"
@@ -216,6 +217,15 @@ def create_admin_router(ctx) -> list[APIRouter]:
             },
             "pass_schedules": settings.all_pass_schedules(),
             "has_anchor": list(HAS_ANCHOR),
+            # Single-source-of-truth pass metadata (passes.py) for a later UI
+            # phase; additive — `passes`/`has_anchor` above stay for today's UI.
+            "registry": [
+                {"name": p.name, "title": p.title, "description": p.description,
+                 "category": p.category, "trigger": p.trigger, "to": list(p.to),
+                 "mode": p.mode, "mention": p.mention, "event_kind": p.event_kind,
+                 "daily": p.daily}
+                for p in passes.REGISTRY.values()
+            ],
             "users": users,
             "rules": rules,
             "templates": templates,

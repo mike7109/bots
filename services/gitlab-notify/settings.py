@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from botkit.config import env
 
+import passes
 import workcal
 
 # Connection settings the admin can override (DB wins over the env default).
@@ -35,17 +36,11 @@ _WEEKDAY_NAMES = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 
 # Default per-pass schedule: which weekdays + what time the internal scheduler
 # fires each pass. `anchor_days` (digests only) = full overview instead of delta.
+# DERIVED from the single pass registry (passes.py) so adding a pass is one entry
+# there; same names/values as before.
 WORKDAYS = [0, 1, 2, 3, 4]
-PASS_DEFAULTS = {
-    "due":     {"enabled": True,  "days": WORKDAYS, "time": "09:00"},
-    "overdue": {"enabled": True,  "days": WORKDAYS, "time": "09:00"},
-    "digest":  {"enabled": True,  "days": WORKDAYS, "time": "09:00", "anchor_days": [2, 4]},
-    "team":    {"enabled": True,  "days": WORKDAYS, "time": "09:30", "anchor_days": [2, 4]},
-    "triage":  {"enabled": True,  "days": [0],      "time": "10:00"},
-    "stale":   {"enabled": True,  "days": [0],      "time": "10:00", "days_idle": 14},
-    "metrics": {"enabled": False, "days": [0],      "time": "10:00"},
-}
-HAS_ANCHOR = ("digest", "team")
+PASS_DEFAULTS = passes.pass_defaults()
+HAS_ANCHOR = passes.has_anchor()
 
 
 class Settings:
