@@ -16,6 +16,7 @@ import logging
 
 from botkit.config import env
 
+import keys
 import passes
 import workcal
 
@@ -339,3 +340,76 @@ class Settings:
 
 def weekday_names(days) -> str:
     return ", ".join(_WEEKDAY_NAMES[d] for d in sorted(days)) or "—"
+
+
+# --- Phase 2a: split the anchor-dual digests into separate full + delta passes -
+# Old world: one `digest`/`team` pass each ran a FULL overview on its anchor
+# weekdays (default Wed/Fri) and a DELTA on the other workdays. New world: those
+# are two passes apiece — digest_full/digest_delta, team_full/team_delta — each
+# with its own schedule. This one-time, idempotent migration carries the old
+# schedule row over so a live deploy keeps its tuned days/time/enabled and so the
+# scheduler treats the new passes as ESTABLISHED (not a fresh deploy that would
+# refuse to recover a missed slot).
+_SPLIT = {
+    # old name -> (full name, delta name, default full days, default delta days, default time)
+    "digest": ("digest_full", "digest_delta", [2, 4], [0, 1, 3], "09:00"),
+    "team": ("team_full", "team_delta", [2, 4], [0, 1, 3], "09:30"),
+}
+_SPLIT_MARKER = ("migration", "split_digests_v1")
+
+
+def migrate_split_digests(store, *, today: dt.date | None = None) -> bool:
+    """Carry old `pass:digest`/`pass:team` rows onto the four split passes.
+
+    Idempotent + marker-guarded: returns False (no-op) once `split_digests_v1`
+    is set. For each old pass row we create the full pass (days = old
+    `anchor_days` or the default full days; time/enabled from the old row) and the
+    delta pass (days = old `days` minus its anchor_days, or the default delta
+    days; same time/enabled). The old rows are LEFT in place as a rollback escape
+    hatch. We then SEED run-history for the new pass names (dated yesterday) for
+    every configured source so the scheduler's missed-run recovery treats them as
+    established rather than blasting on first tick. The delta baseline needs no
+    migration: event_kind is unchanged, so the existing digest_personal/
+    digest_team snapshots already serve as the delta's baseline under the same key.
+    """
+    if store.get_state(*_SPLIT_MARKER):
+        return False
+    today = today or dt.date.today()
+    yesterday = (today - dt.timedelta(days=1)).isoformat()
+    # Source ids: the scheduler keys run-history as keys.ns(src_id, pass_name);
+    # sources live in the state DB under kind "source". Best-effort — if none are
+    # configured yet, seed under skey="" so a single-source deploy still recovers.
+    src_ids = list(store.list_state("source").keys()) or [""]
+    new_enabled: list[str] = []
+
+    for old_name, (full_name, delta_name, def_full, def_delta, def_time) in _SPLIT.items():
+        old = store.get_state(_KIND, f"pass:{old_name}") or {}
+        enabled = bool(old.get("enabled", True))
+        time = old.get("time", def_time)
+        anchor_days = sorted(int(d) for d in old.get("anchor_days", def_full))
+        all_days = sorted(int(d) for d in old.get("days", [])) if old.get("days") else None
+        # Full pass runs on the old anchor days; delta on the remaining workdays.
+        full_days = anchor_days or list(def_full)
+        if all_days is not None:
+            delta_days = [d for d in all_days if d not in set(anchor_days)] or list(def_delta)
+        else:
+            delta_days = list(def_delta)
+        # Upsert (idempotent): only sets the schedule fields the split owns.
+        store.set_state(_KIND, f"pass:{full_name}",
+                        {"enabled": enabled, "days": full_days, "time": time})
+        store.set_state(_KIND, f"pass:{delta_name}",
+                        {"enabled": enabled, "days": delta_days, "time": time})
+        if enabled:
+            new_enabled += [full_name, delta_name]
+
+    # Seed run-history (yesterday) so the new passes look ESTABLISHED, not fresh.
+    for sid in src_ids:
+        for name in new_enabled:
+            schedkey = keys.ns(sid, name)
+            if store.last_run(schedkey) is None:        # don't clobber a real run
+                store.record_run(schedkey, yesterday, ok=True)
+
+    store.set_state(*_SPLIT_MARKER, True)
+    log.info("split-digests migration: created %s; seeded run-history for %d source(s)",
+             ", ".join(sorted({n for v in _SPLIT.values() for n in v[:2]})), len(src_ids))
+    return True

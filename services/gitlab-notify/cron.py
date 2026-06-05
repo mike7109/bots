@@ -4,14 +4,16 @@ Webhooks only cover issue open/close/reopen. Everything date-driven or
 aggregated has no event to hang off, so we poll the API. Each subcommand is one
 pass; `all` runs the daily set (metrics is weekly, so it's opt-in):
 
-    python cron.py            # all daily passes
-    python cron.py due        # due tomorrow -> room
-    python cron.py overdue    # past due -> personal DM (deduped)
-    python cron.py digest     # personal "what's on me" DM per assignee
-    python cron.py team       # standup overview -> room
-    python cron.py triage     # untriaged issues -> room
-    python cron.py stale      # issues with no activity for N days -> room
-    python cron.py metrics    # weekly issue-flow snapshot -> room
+    python cron.py                 # all daily passes
+    python cron.py due             # due tomorrow -> room
+    python cron.py overdue         # past due -> personal DM (deduped)
+    python cron.py digest_full     # personal full overview DM per assignee
+    python cron.py digest_delta    # personal "what changed since yesterday" DM
+    python cron.py team_full       # standup full overview -> room
+    python cron.py team_delta      # standup "what changed" -> room
+    python cron.py triage          # untriaged issues -> room
+    python cron.py stale           # issues with no activity for N days -> room
+    python cron.py metrics         # weekly issue-flow snapshot -> room
 
 Everything dedups through botkit.store so a second run the same day is a no-op
 (see Store and digests.py). This is also the right place to reconcile Task
@@ -52,11 +54,13 @@ def run_one(engine, gl, group_id: str, store, name: str, *,
     groups don't collide.
 
     Timing/mode:
-      * `anchor` — scheduled anchor day; digests send a full overview (delta
-        otherwise). The scheduler/host-cron pass this and leave `full=None`.
-      * `full` — explicit operator override of the delta/full mode for the two
-        delta digests (`digest`/`team`); None derives it from `anchor`. Ignored
-        by single-mode passes.
+      * `anchor` — legacy scheduled-anchor flag, now INERT for the split digests:
+        Phase 2a replaced the anchor-dual digest/team with separate full/delta
+        passes whose adapters FORCE the mode, so this no longer selects full vs
+        delta. Kept for the uniform signature.
+      * `full` — legacy explicit full/delta override; the split digest adapters
+        ignore the caller's value and force their own mode. Still ignored by the
+        single-mode passes.
 
     State/preview:
       * `commit=True` (default — scheduler/host-cron) — keep today's per-pass

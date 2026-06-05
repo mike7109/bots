@@ -109,6 +109,10 @@ def tick(ctx) -> None:
                 continue
             if store.already_sent(keys.SCHED, schedkey, day=iso):   # already fired today (this source)
                 continue
+            # `anchor` is now inert for the digest passes — Phase 2a split them
+            # into separate full/delta passes whose adapters FORCE the mode, and
+            # no pass carries `anchor_days` anymore (so this is always False).
+            # Kept for the uniform run_one signature.
             anchor = today.weekday() in cfg.get("anchor_days", [])
             try:
                 result = cron.run_one(ctx.engine, gl, gid, store, name,

@@ -374,6 +374,9 @@ def personal(engine, issues: list[dict], store, *, today: dt.date | None = None,
         prev = store.get_state(keys.DIGEST_PERSONAL, pkey)
 
         if is_full:
+            # Full overview. The FULL pass is a pure reader: it sends the whole
+            # picture but NEVER touches the delta baseline — the delta pass is the
+            # sole owner/writer of that snapshot (see the delta path below).
             extra = {"mode": "full", "date": iso, "total": len(rows),
                      "sections": _full_sections(rows, iso, horizon)}
         elif prev is None:
@@ -403,7 +406,10 @@ def personal(engine, issues: list[dict], store, *, today: dt.date | None = None,
             sent += 1
             if commit:
                 store.mark_sent(keys.DIGEST_PERSONAL, pkey, day=iso)
-                store.set_state(keys.DIGEST_PERSONAL, pkey, current)
+                if not is_full:
+                    # BASELINE OWNERSHIP: only the delta pass advances the baseline.
+                    # A full send is a read-only overview and must leave it intact.
+                    store.set_state(keys.DIGEST_PERSONAL, pkey, current)
         else:
             log.warning("%s [%s] not delivered: %s", keys.DIGEST_PERSONAL, pkey, result)
     log.info("personal digest: %d sent (%s)", sent, "full" if is_full else "delta")
@@ -477,6 +483,8 @@ def team(engine, issues: list[dict], store, *, today: dt.date | None = None,
     if commit and store.already_sent(keys.DIGEST_TEAM, gkey, day=iso):
         return _result(0, "ok", rcpt)
     if is_full:
+        # Full overview — read-only: the full pass never writes the baseline (the
+        # delta pass is the sole owner; see the gated set_state at the tail).
         sections = _team_sections(rows, iso, sec_horizon)
         if not sections:
             return _result(0, "empty", [])
@@ -499,7 +507,10 @@ def team(engine, issues: list[dict], store, *, today: dt.date | None = None,
     sent = 1 if result.get("sent") else 0
     if sent and commit:
         store.mark_sent(keys.DIGEST_TEAM, gkey, day=iso)
-        store.set_state(keys.DIGEST_TEAM, gkey, current)
+        if not is_full:
+            # BASELINE OWNERSHIP: only the delta pass advances the baseline; a
+            # full send is read-only and leaves the delta's snapshot untouched.
+            store.set_state(keys.DIGEST_TEAM, gkey, current)
     if not sent:
         log.warning("%s [%s] not delivered: %s", keys.DIGEST_TEAM, gkey, result)
     return _result(sent, "ok", rcpt, html=_render(engine, event))

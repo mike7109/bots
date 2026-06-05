@@ -189,15 +189,14 @@ class _DigestEngine:
         return f"<{template}>"
 
 
-def test_run_one_team_manual_full_is_repeatable_and_stateless(tmp_path):
-    # admin path: full mode, commit=False -> sends every click, writes no ledger.
+def test_run_one_team_full_manual_is_repeatable_and_stateless(tmp_path):
+    # admin path: team_full (forces full mode), commit=False -> sends every click,
+    # writes no ledger (and a full pass never touches the delta baseline anyway).
     store = Store(path=str(tmp_path / "s.db"))
     engine = _DigestEngine()
     gl = _GitLab([_issue(1, gid=11, due=YESTERDAY)])
-    r1 = cron.run_one(engine, gl, "g1", store, "team",
-                      full=True, commit=False, room="!r", skey="s1")
-    r2 = cron.run_one(engine, gl, "g1", store, "team",
-                      full=True, commit=False, room="!r", skey="s1")
+    r1 = cron.run_one(engine, gl, "g1", store, "team_full", commit=False, room="!r", skey="s1")
+    r2 = cron.run_one(engine, gl, "g1", store, "team_full", commit=False, room="!r", skey="s1")
     assert r1["sent"] == 1 and r2["sent"] == 1
     assert r1["recipients"] == ["room:!r"]
     assert r1["html"] == "<digest_team>"
@@ -205,16 +204,29 @@ def test_run_one_team_manual_full_is_repeatable_and_stateless(tmp_path):
     assert store.get_state("digest_team", "s1:group") is None     # no baseline
 
 
-def test_run_one_team_anchor_commit_is_unchanged(tmp_path):
-    # scheduler path: anchor day, commit default -> writes the dedup + baseline,
-    # second run the same day is a no-op (byte-identical to before the redesign).
+def test_run_one_team_full_commit_marks_dedup_but_not_baseline(tmp_path):
+    # scheduler path: team_full on a committed run writes the per-day dedup, sends
+    # the full overview, but does NOT write the baseline (that's team_delta's).
+    # A second run the same day is a no-op (dedup holds).
     store = Store(path=str(tmp_path / "s.db"))
     engine = _DigestEngine()
     gl = _GitLab([_issue(1, gid=11, due=YESTERDAY)])
-    r1 = cron.run_one(engine, gl, "g1", store, "team", anchor=True, room="!r", skey="s1")
+    r1 = cron.run_one(engine, gl, "g1", store, "team_full", room="!r", skey="s1")
     assert r1["sent"] == 1
     assert store.already_sent("digest_team", "s1:group")          # mark_sent written
-    assert store.get_state("digest_team", "s1:group") is not None  # baseline learned
-    r2 = cron.run_one(engine, gl, "g1", store, "team", anchor=True, room="!r", skey="s1")
+    assert store.get_state("digest_team", "s1:group") is None     # baseline untouched
+    r2 = cron.run_one(engine, gl, "g1", store, "team_full", room="!r", skey="s1")
     assert r2["sent"] == 0                                         # deduped
     assert len(engine.handled) == 1
+
+
+def test_run_one_team_delta_commit_writes_baseline(tmp_path):
+    # scheduler path: team_delta is the SOLE baseline owner. First committed run
+    # with no baseline learns it silently (no_baseline); the snapshot is written.
+    store = Store(path=str(tmp_path / "s.db"))
+    engine = _DigestEngine()
+    gl = _GitLab([_issue(1, gid=11, due=YESTERDAY)])
+    r = cron.run_one(engine, gl, "g1", store, "team_delta", room="!r", skey="s1")
+    assert r["sent"] == 0 and r["reason"] == "no_baseline"
+    assert store.get_state("digest_team", "s1:group") is not None  # baseline learned
+    assert engine.handled == []

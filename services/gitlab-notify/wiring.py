@@ -21,7 +21,7 @@ from botkit.store import Store
 
 from alerts import Alerter
 from context import AppContext
-from settings import Settings
+from settings import Settings, migrate_split_digests
 from sources import Sources, seed_from_env
 
 HERE = Path(__file__).parent
@@ -60,6 +60,13 @@ def build_context() -> AppContext:
     sources = Sources(store, settings)
     seed_from_env(sources, group_id=env("GITLAB_GROUP_ID"), token=env("GITLAB_TOKEN"),
                   room=env("MATRIX_ROOM") or config["defaults"].get("room_id"))
+
+    # Phase 2a: one-time, idempotent split of the old anchor-dual digest/team
+    # passes into separate full + delta passes (carries the live schedule over and
+    # seeds run-history so the scheduler treats them as established). Runs after
+    # sources are seeded (so it can key run-history per source) and before any
+    # scheduler tick. Marker-guarded — a no-op on every boot after the first.
+    migrate_split_digests(store)
 
     # Operator alerting: DM engineers when a scheduled pass throws (see alerts.py).
     alerter = Alerter(matrix, identity, settings, store)

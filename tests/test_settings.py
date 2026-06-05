@@ -56,15 +56,15 @@ def test_push_notice_modes(settings):
 
 # --- per-pass schedule ------------------------------------------------
 def test_pass_schedule_default(settings):
-    assert settings.pass_schedule("digest") == PASS_DEFAULTS["digest"]
+    assert settings.pass_schedule("digest_full") == PASS_DEFAULTS["digest_full"]
 
 
 def test_pass_schedule_override_merges_over_default(settings):
-    settings.update_pass("digest", {"time": "07:30"})
-    sched = settings.pass_schedule("digest")
+    settings.update_pass("digest_full", {"time": "07:30"})
+    sched = settings.pass_schedule("digest_full")
     assert sched["time"] == "07:30"                 # overridden
-    assert sched["days"] == PASS_DEFAULTS["digest"]["days"]   # kept from default
-    assert sched["anchor_days"] == PASS_DEFAULTS["digest"]["anchor_days"]
+    assert sched["days"] == PASS_DEFAULTS["digest_full"]["days"]   # kept from default
+    assert sched["enabled"] == PASS_DEFAULTS["digest_full"]["enabled"]
 
 
 def test_pass_schedule_unknown_name_fallback(settings):

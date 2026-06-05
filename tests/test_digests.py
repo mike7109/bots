@@ -293,9 +293,10 @@ def test_personal_full_sends_overview(tmp_path):
 def test_personal_delta_with_baseline_sends_on_change(tmp_path):
     store = Store(path=str(tmp_path / "s.db"))
     engine = _RecordingEngine()
-    # Seed a baseline via a committed run on an anchor day, then change the issue.
+    # Seed a baseline via a committed DELTA run (the delta pass owns the baseline;
+    # a full run would NOT write it), then change the issue.
     base = [_person_issue(1, "misha", due="2026-06-10")]
-    digests.personal(engine, base, store, today=TUE, full=True, commit=True)
+    digests.personal(engine, base, store, today=TUE, full=False, commit=True)  # learns baseline
     changed = [_person_issue(1, "misha", due="2026-06-03")]   # due moved -> a delta
     r = digests.personal(engine, changed, store, today=TUE, full=False, commit=False)
     assert r["sent"] == 1 and r["reason"] == "ok"
@@ -347,8 +348,10 @@ def test_team_dry_renders_without_dispatch(tmp_path):
     assert engine.handled == []
 
 
-# --- (e) scheduler path (commit=True) still dedups + learns baseline -------
-def test_personal_commit_writes_ledger_and_baseline(tmp_path):
+# --- (e) scheduler path (commit=True): baseline OWNERSHIP -----------------
+# Phase 2a: the FULL pass is read-only — a committed full send marks the per-day
+# dedup but must NOT write the delta baseline. The DELTA pass is the sole writer.
+def test_personal_full_commit_marks_dedup_but_not_baseline(tmp_path):
     store = Store(path=str(tmp_path / "s.db"))
     engine = _RecordingEngine()
     issues = [_person_issue(1, "misha", due="2026-06-10")]
@@ -356,14 +359,14 @@ def test_personal_commit_writes_ledger_and_baseline(tmp_path):
     assert r1["sent"] == 1
     pkey = keys.ns("", "misha")
     assert store.already_sent(keys.DIGEST_PERSONAL, pkey, day="2026-06-02")   # mark_sent written
-    assert store.get_state(keys.DIGEST_PERSONAL, pkey) is not None            # baseline learned
+    assert store.get_state(keys.DIGEST_PERSONAL, pkey) is None                # baseline NOT written
     # second commit run same day is a no-op (dedup gate holds)
     r2 = digests.personal(engine, issues, store, today=TUE, full=True, commit=True)
     assert r2["sent"] == 0
     assert len(engine.handled) == 1
 
 
-def test_team_commit_writes_ledger_and_baseline(tmp_path):
+def test_team_full_commit_marks_dedup_but_not_baseline(tmp_path):
     store = Store(path=str(tmp_path / "s.db"))
     engine = _RecordingEngine()
     issues = [_person_issue(1, "misha", due="2026-06-01")]
@@ -371,7 +374,41 @@ def test_team_commit_writes_ledger_and_baseline(tmp_path):
     assert r1["sent"] == 1
     gkey = keys.ns("", "group")
     assert store.already_sent(keys.DIGEST_TEAM, gkey, day="2026-06-02")
-    assert store.get_state(keys.DIGEST_TEAM, gkey) is not None
+    assert store.get_state(keys.DIGEST_TEAM, gkey) is None                    # baseline NOT written
     r2 = digests.team(engine, issues, store, today=TUE, full=True, commit=True, room="!r")
     assert r2["sent"] == 0
     assert len(engine.handled) == 1
+
+
+def test_personal_delta_commit_owns_and_advances_baseline(tmp_path):
+    # The DELTA pass writes the baseline. First committed run with no baseline
+    # learns it silently; a later change is a real delta that ADVANCES it.
+    store = Store(path=str(tmp_path / "s.db"))
+    engine = _RecordingEngine()
+    pkey = keys.ns("", "misha")
+    base = [_person_issue(1, "misha", due="2026-06-10")]
+    r0 = digests.personal(engine, base, store, today=TUE, full=False, commit=True)
+    assert r0["sent"] == 0 and r0["reason"] == "no_baseline"
+    snap1 = store.get_state(keys.DIGEST_PERSONAL, pkey)
+    assert snap1 is not None                                                  # baseline learned
+    assert engine.handled == []
+    # change the issue: a real delta -> sends AND advances the baseline.
+    changed = [_person_issue(1, "misha", due="2026-06-03")]
+    r1 = digests.personal(engine, changed, store, today=TUE, full=False, commit=True)
+    assert r1["sent"] == 1 and engine.handled[-1].extra["mode"] == "delta"
+    assert store.get_state(keys.DIGEST_PERSONAL, pkey) != snap1               # baseline advanced
+
+
+def test_team_delta_commit_owns_and_advances_baseline(tmp_path):
+    store = Store(path=str(tmp_path / "s.db"))
+    engine = _RecordingEngine()
+    gkey = keys.ns("", "group")
+    base = [_person_issue(1, "misha", due="2026-06-01")]
+    r0 = digests.team(engine, base, store, today=TUE, full=False, commit=True, room="!r")
+    assert r0["sent"] == 0 and r0["reason"] == "no_baseline"
+    snap1 = store.get_state(keys.DIGEST_TEAM, gkey)
+    assert snap1 is not None
+    changed = [_person_issue(1, "misha", due="2026-06-03")]
+    r1 = digests.team(engine, changed, store, today=TUE, full=False, commit=True, room="!r")
+    assert r1["sent"] == 1 and engine.handled[-1].extra["mode"] == "delta"
+    assert store.get_state(keys.DIGEST_TEAM, gkey) != snap1

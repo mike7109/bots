@@ -48,8 +48,10 @@ class Pass:
                        config.yaml rule `event:` and keys.py constants).
       to               destination tuple: ("room",) or ("dm",).
       mention          who gets @-pinged ("assignee") or None.
-      mode             "auto" = anchor-dual (full on anchor day, delta otherwise:
-                       digest/team); "single" = one mode always (the rest).
+      mode             "full" = always a full overview (digest_full/team_full),
+                       "delta" = always a delta and the SOLE writer of the delta
+                       baseline (digest_delta/team_delta); "single" = one mode
+                       always (the per-issue reminders + weekly hygiene passes).
       daily            True if run by a bare `cron.py all` (the daily set);
                        False for weekly-only passes (metrics).
       schedule_defaults the default scheduler config (enabled/days/time [+anchor_days
@@ -83,17 +85,16 @@ WORKDAYS = [0, 1, 2, 3, 4]
 # /`wk` dicts and the anchor->full derivation are reconstructed here, locally,
 # so the dispatch is byte-identical).
 def _ds_kwargs(*, full, dry, commit, room, skey) -> dict:
-    """The `ds` dict the old run_one built for the two delta digests.
+    """The kwargs the split digest adapters pass to digests.personal/team.
 
-    `full` here is ALREADY the resolved mode (`is_full`): run_one folds the
-    scheduler's `anchor` flag into it (`full = full if full is not None else
-    anchor`) before dispatch. The old code passed `anchor_days={wd}` when full
-    else `set()`; the digest functions re-derive `is_full = full if full is not
-    None else (wd in anchor_days)`, which here collapses to exactly `full`, so
-    the effective full/delta mode is byte-identical to before.
+    `full` here is the pass's FIXED mode — each split pass forces it (digest_full
+    -> True, digest_delta -> False), regardless of the scheduler's `anchor` flag
+    (the anchor concept is gone for these). We pass `full` explicitly so the
+    digest function never re-derives it from an anchor day; `anchor_days` is left
+    empty/inert. `skip_weekends=False` mirrors the old run_one (the scheduler's
+    own non-working-day gate already silences weekends/holidays).
     """
-    wd = dt.date.today().weekday()
-    return dict(anchor_days={wd} if full else set(), holidays=frozenset(),
+    return dict(anchor_days=set(), holidays=frozenset(),
                 skip_weekends=False, room=room, skey=skey, full=full, dry=dry, commit=commit)
 
 
@@ -114,14 +115,27 @@ def _run_overdue(engine, gl, group_id, issues, store, *, full, dry, commit, room
                                commit=commit, dry=dry)
 
 
-def _run_digest(engine, gl, group_id, issues, store, *, full, dry, commit, room, skey):
+# The four split digest adapters FORCE the pass's mode (ignoring the caller's
+# `full`/anchor): a digest_full run is always a full overview, a digest_delta run
+# is always a delta (and the sole writer of the delta baseline) — see digests.py.
+def _run_digest_full(engine, gl, group_id, issues, store, *, full, dry, commit, room, skey):
     return digests.personal(engine, issues, store,
-                            **_ds_kwargs(full=full, dry=dry, commit=commit, room=room, skey=skey))
+                            **_ds_kwargs(full=True, dry=dry, commit=commit, room=room, skey=skey))
 
 
-def _run_team(engine, gl, group_id, issues, store, *, full, dry, commit, room, skey):
+def _run_digest_delta(engine, gl, group_id, issues, store, *, full, dry, commit, room, skey):
+    return digests.personal(engine, issues, store,
+                            **_ds_kwargs(full=False, dry=dry, commit=commit, room=room, skey=skey))
+
+
+def _run_team_full(engine, gl, group_id, issues, store, *, full, dry, commit, room, skey):
     return digests.team(engine, issues, store,
-                        **_ds_kwargs(full=full, dry=dry, commit=commit, room=room, skey=skey))
+                        **_ds_kwargs(full=True, dry=dry, commit=commit, room=room, skey=skey))
+
+
+def _run_team_delta(engine, gl, group_id, issues, store, *, full, dry, commit, room, skey):
+    return digests.team(engine, issues, store,
+                        **_ds_kwargs(full=False, dry=dry, commit=commit, room=room, skey=skey))
 
 
 def _run_triage(engine, gl, group_id, issues, store, *, full, dry, commit, room, skey):
@@ -141,8 +155,9 @@ def _run_metrics(engine, gl, group_id, issues, store, *, full, dry, commit, room
 
 
 # --- the registry --------------------------------------------------------
-# Ordered to preserve the old cron.PASSES order (due, overdue, digest, team,
-# triage, stale, metrics) + the issue webhook last.
+# Order: due, overdue, then the four split digests (digest_full/digest_delta,
+# team_full/team_delta — Phase 2a split each anchor-dual digest into a separate
+# full and delta pass), triage, stale, metrics + the issue webhook last.
 _PASSES = [
     Pass(
         name="due", title="Дедлайн завтра",
@@ -161,20 +176,36 @@ _PASSES = [
         run=_run_overdue,
     ),
     Pass(
-        name="digest", title="Личный дайджест «Задачи на сегодня»",
-        description="Каждому в личку его задачи. В якорные дни — полный обзор, в остальные — только изменения со вчера.",
+        name="digest_full", title="Личный дайджест — полный",
+        description="Каждому в личку полный обзор его задач, сгруппированный по срокам. По умолчанию по средам и пятницам.",
         category="personal", trigger="schedule", template="digest_personal",
-        event_kind=keys.DIGEST_PERSONAL, to=("dm",), mention=None, mode="auto", daily=True,
-        schedule_defaults={"enabled": True, "days": WORKDAYS, "time": "09:00", "anchor_days": [2, 4]},
-        run=_run_digest,
+        event_kind=keys.DIGEST_PERSONAL, to=("dm",), mention=None, mode="full", daily=True,
+        schedule_defaults={"enabled": True, "days": [2, 4], "time": "09:00"},
+        run=_run_digest_full,
     ),
     Pass(
-        name="team", title="Сводка команды",
-        description="Обзор задач команды в общую комнату: просрочено / сегодня / ближайшие / в работе.",
+        name="digest_delta", title="Личный дайджест — изменения",
+        description="Каждому в личку, что изменилось со вчера: новые/снятые задачи, перенос срока, переход в просрочку. По умолчанию пн/вт/чт.",
+        category="personal", trigger="schedule", template="digest_personal",
+        event_kind=keys.DIGEST_PERSONAL, to=("dm",), mention=None, mode="delta", daily=True,
+        schedule_defaults={"enabled": True, "days": [0, 1, 3], "time": "09:00"},
+        run=_run_digest_delta,
+    ),
+    Pass(
+        name="team_full", title="Сводка команды — полная",
+        description="Полный обзор задач команды в общую комнату: просрочено / сегодня / ближайшие / в работе. По умолчанию по средам и пятницам.",
         category="group", trigger="schedule", template="digest_team",
-        event_kind=keys.DIGEST_TEAM, to=("room",), mention=None, mode="auto", daily=True,
-        schedule_defaults={"enabled": True, "days": WORKDAYS, "time": "09:30", "anchor_days": [2, 4]},
-        run=_run_team,
+        event_kind=keys.DIGEST_TEAM, to=("room",), mention=None, mode="full", daily=True,
+        schedule_defaults={"enabled": True, "days": [2, 4], "time": "09:30"},
+        run=_run_team_full,
+    ),
+    Pass(
+        name="team_delta", title="Сводка команды — изменения",
+        description="Что изменилось в задачах команды со вчера → в общую комнату. По умолчанию пн/вт/чт.",
+        category="group", trigger="schedule", template="digest_team",
+        event_kind=keys.DIGEST_TEAM, to=("room",), mention=None, mode="delta", daily=True,
+        schedule_defaults={"enabled": True, "days": [0, 1, 3], "time": "09:30"},
+        run=_run_team_delta,
     ),
     Pass(
         name="triage", title="Триаж",
@@ -229,5 +260,7 @@ def pass_defaults() -> dict:
 
 
 def has_anchor() -> tuple[str, ...]:
-    """Scheduled passes whose mode is anchor-dual — the old settings.HAS_ANCHOR."""
-    return tuple(p.name for p in REGISTRY.values() if p.trigger == "schedule" and p.mode == "auto")
+    """Anchor-dual passes — empty since Phase 2a split digest/team into separate
+    full + delta passes (no pass is anchor-dual anymore). Kept (returning ()) for
+    back-compat with the admin payload until the Phase 4 UI cleanup."""
+    return ()
