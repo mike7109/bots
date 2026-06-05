@@ -219,7 +219,7 @@ HTML = r"""<!doctype html>
         <button class="sm" onclick="checkMatrix(this)">🔌 Проверить</button><span id="cMx" style="font-size:13px"></span></div>
       <div class="row"><span class="mut" style="width:150px">Секрет вебхука</span><span id="cWhWrap"></span></div>
       <div class="row"><span class="mut" style="width:150px">GitLab URL</span><input type="text" id="cGl" style="width:300px" placeholder="https://git.…"></div>
-      <div class="row"><button class="primary" onclick="saveConn()">Сохранить</button></div>
+      <div class="row"><button class="primary" onclick="saveConn()">Сохранить адреса</button><span class="mut" style="font-size:12px">— homeserver и GitLab URL (секреты сохраняются своей кнопкой выше)</span></div>
     </div>
     <div class="card"><h2>Проверка конфигурации</h2>
       <p class="hint">Прогоняет всё: Matrix, секрет вебхука, GitLab URL, и каждую группу (доступ по токену + состоит ли бот в её комнате). Видно, что не настроено.</p>
@@ -344,21 +344,24 @@ function renderUsers(){
     <td><select onchange="setUser('${login}',{push:this.value})">${S.push_modes.map(m=>`<option value="${m}" ${u.push===m?'selected':''}>${PUSHL[m]||m}</option>`).join('')}</select></td></tr>`).join('')
     ||'<tr><td colspan=5 class="mut">Никого не найдено.</td></tr>';
 }
-// Секрет: если задан — чип «🔒 задан …xxxx» + «Заменить»; иначе поле ввода.
-function secretField(wrapId,inputId,has,masked,ph,w){
+// Секрет conn: если задан — чип «🔒 задан …xxxx» + «Заменить»; иначе поле + «Сохранить».
+function secretField(wrapId,inputId,field,has,masked,ph,w){
   $(wrapId).innerHTML=has
-    ? `<span class="badge sent">🔒 задан ${esc(masked)}</span> <button class="sm" type="button" onclick="revealSecret('${wrapId}','${inputId}','${esc(ph)}',${w})">Заменить</button>`
-    : `<input id="${inputId}" type="password" placeholder="${esc(ph)}" style="width:${w}px">`;
+    ? `<span class="badge sent">🔒 задан ${esc(masked)}</span> <button class="sm" type="button" onclick="revealSecret('${wrapId}','${inputId}','${field}','${esc(ph)}',${w})">Заменить</button>`
+    : `<input id="${inputId}" type="password" placeholder="${esc(ph)}" style="width:${w}px"> <button class="primary sm" type="button" onclick="saveSecret('${inputId}','${field}')">Сохранить</button>`;
 }
-function revealSecret(wrapId,inputId,ph,w){
-  $(wrapId).innerHTML=`<input id="${inputId}" type="password" placeholder="новый ${esc(ph)}" style="width:${w}px"> <button class="sm" type="button" onclick="load()">Отмена</button>`;
+function revealSecret(wrapId,inputId,field,ph,w){
+  $(wrapId).innerHTML=`<input id="${inputId}" type="password" placeholder="новый ${esc(ph)}" style="width:${w}px"> <button class="primary sm" type="button" onclick="saveSecret('${inputId}','${field}')">Сохранить</button> <button class="sm" type="button" onclick="load()">Отмена</button>`;
   $(inputId).focus();
 }
+async function saveSecret(inputId,field){const v=$(inputId).value;
+  if(!v){toast('Введите значение',true);return;}
+  await api('/conn','POST',{[field]:v});toast('Сохранено');load();}
 function renderConn(c){c=c||{};
   $('cHs').value=c.matrix_homeserver||'';
   $('cGl').value=c.gitlab_url||'';
-  secretField('cTokWrap','cTok',c.has_matrix_token,c.matrix_token_masked,'syt_…',300);
-  secretField('cWhWrap','cWh',c.has_webhook_secret,c.webhook_secret_masked,'секрет вебхука',300);
+  secretField('cTokWrap','cTok','matrix_token',c.has_matrix_token,c.matrix_token_masked,'syt_…',300);
+  secretField('cWhWrap','cWh','webhook_secret',c.has_webhook_secret,c.webhook_secret_masked,'секрет вебхука',300);
 }
 async function saveConn(){
   const body={matrix_homeserver:$('cHs').value,gitlab_url:$('cGl').value};
@@ -419,7 +422,7 @@ function renderSources(){
   $('srcCards').innerHTML=list+srcCard({});   // + пустая карточка для добавления
 }
 function grpTokEdit(btn){const w=btn.closest('.tokWrap');
-  w.innerHTML='<input class="sTok" type="password" placeholder="новый glpat-…" style="width:160px"> <button class="sm" type="button" onclick="renderSources()">Отмена</button>';
+  w.innerHTML='<input class="sTok" type="password" placeholder="новый glpat-…" style="width:150px"> <button class="primary sm" type="button" onclick="saveSrc(this)">Сохранить</button> <button class="sm" type="button" onclick="renderSources()">Отмена</button>';
   w.querySelector('input').focus();}
 function _srcBody(card){
   const t=card.querySelector('.sTok');               // нет поля = чип «задан» -> токен не трогаем
