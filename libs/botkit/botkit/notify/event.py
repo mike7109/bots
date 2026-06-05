@@ -22,4 +22,5 @@ class Event:
     assignees: list[str] = field(default_factory=list)  # GitLab logins (resolved via Identity)
     author: str | None = None       # GitLab login of who triggered it
     due: str | None = None          # ISO date, for due_soon
+    room: str | None = None         # target room override (multi-source routing); else defaults
     extra: dict = field(default_factory=dict)  # anything source-specific

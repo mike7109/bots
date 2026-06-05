@@ -33,9 +33,8 @@ async def lifespan(app: FastAPI):
     # with SCHEDULER_ENABLED=false (e.g. if you'd rather drive cron.py from host).
     task = stop = None
     if env("SCHEDULER_ENABLED", "true").lower() != "false" and env("GITLAB_URL"):
-        gl = GitLabClient(env("GITLAB_URL"), env("GITLAB_TOKEN"))
         stop = asyncio.Event()
-        task = asyncio.create_task(run_scheduler(engine, gl, env("GITLAB_GROUP_ID", "3"), stop))
+        task = asyncio.create_task(run_scheduler(engine, stop))   # iterates sources itself
     yield
     if task:
         stop.set()
@@ -60,4 +59,9 @@ async def webhook(request: Request, x_gitlab_token: str = Header(default="")):
     event = normalize(payload)
     if event is None:
         return {"ignored": f"unhandled event: {payload.get('object_kind')}"}
+
+    # Multi-group routing: send to the matching source's room (else default room).
+    src = engine.sources.match_path(event.project)
+    if src:
+        event.room = src.get("room")
     return engine.handle(event)

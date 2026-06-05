@@ -35,7 +35,7 @@ DAILY = ("due", "overdue", "digest", "team", "triage", "stale")
 PASSES = DAILY + ("metrics",)
 
 
-def _event(issue: dict, *, kind: str, action: str) -> Event:
+def _event(issue: dict, *, kind: str, action: str, room=None) -> Event:
     """Build a single-issue Event from a GitLab REST issue object."""
     assignees = [a.get("username") for a in (issue.get("assignees") or []) if a.get("username")]
     return Event(
@@ -49,19 +49,20 @@ def _event(issue: dict, *, kind: str, action: str) -> Event:
         labels=issue.get("labels", []),
         assignees=assignees,
         due=issue.get("due_date"),
+        room=room,
     )
 
 
-def run_due_soon(engine, issues: list[dict], store: Store) -> int:
+def run_due_soon(engine, issues: list[dict], store: Store, *, room=None, skey: str = "") -> int:
     tomorrow = (dt.date.today() + dt.timedelta(days=1)).isoformat()
     sent = 0
     for issue in issues:
         if issue.get("due_date") != tomorrow:
             continue
-        key = issue.get("id")
+        key = digests._ns(skey, issue.get("id"))
         if store.already_sent("due_soon", key):
             continue
-        result = engine.handle(_event(issue, kind="due_soon", action="due"))
+        result = engine.handle(_event(issue, kind="due_soon", action="due", room=room))
         if result.get("sent"):
             store.mark_sent("due_soon", key)
             sent += 1
@@ -69,7 +70,7 @@ def run_due_soon(engine, issues: list[dict], store: Store) -> int:
     return sent
 
 
-def run_overdue(engine, issues: list[dict], store: Store) -> int:
+def run_overdue(engine, issues: list[dict], store: Store, *, room=None, skey: str = "") -> int:
     """Open issues whose due_date is already in the past -> DM, once per day."""
     today = dt.date.today().isoformat()
     sent = 0
@@ -77,10 +78,10 @@ def run_overdue(engine, issues: list[dict], store: Store) -> int:
         due = issue.get("due_date")
         if not due or due >= today:
             continue
-        key = issue.get("id")  # global issue id — stable across renames/moves
+        key = digests._ns(skey, issue.get("id"))  # global issue id — stable across renames
         if store.already_sent("overdue", key):
             continue
-        result = engine.handle(_event(issue, kind="overdue", action="overdue"))
+        result = engine.handle(_event(issue, kind="overdue", action="overdue", room=room))
         if result.get("sent"):
             store.mark_sent("overdue", key)
             sent += 1
@@ -91,22 +92,23 @@ def run_overdue(engine, issues: list[dict], store: Store) -> int:
 
 
 def run_one(engine, gl, group_id: str, store, name: str, *,
-            force: bool = False, anchor: bool = False) -> int:
+            force: bool = False, anchor: bool = False, room=None, skey: str = "") -> int:
     """Run a single pass by name. Shared by the scheduler and the admin "send now".
 
-    The caller decides timing, so the pass just runs: `force` (manual trigger) or
-    `anchor` (scheduled anchor day) -> digests send a full overview; otherwise a
-    delta. triage/stale always run when called.
+    `room`/`skey` route this source's events to its room and namespace dedup so
+    groups don't collide. The caller decides timing: `force` (manual trigger) or
+    `anchor` (scheduled anchor day) -> digests send a full overview; else a delta.
     """
     issues = gl.group_issues(group_id, state="opened", scope="all")
     wd = dt.date.today().weekday()
     full = force or anchor
-    ds = dict(anchor_days={wd} if full else set(), holidays=frozenset(), skip_weekends=False)
-    wk = dict(weekly_day=wd, holidays=frozenset())
+    ds = dict(anchor_days={wd} if full else set(), holidays=frozenset(), skip_weekends=False,
+              room=room, skey=skey)
+    wk = dict(weekly_day=wd, holidays=frozenset(), room=room, skey=skey)
     if name == "due":
-        return run_due_soon(engine, issues, store)
+        return run_due_soon(engine, issues, store, room=room, skey=skey)
     if name == "overdue":
-        return run_overdue(engine, issues, store)
+        return run_overdue(engine, issues, store, room=room, skey=skey)
     if name == "digest":
         return digests.personal(engine, issues, store, **ds)
     if name == "team":
@@ -117,7 +119,7 @@ def run_one(engine, gl, group_id: str, store, name: str, *,
         return digests.stale(engine, gl, group_id, store,
                              days=int(env("STALE_DAYS", str(digests.STALE_DAYS))), **wk)
     if name == "metrics":
-        return digests.metrics(engine, gl, group_id, store)
+        return digests.metrics(engine, gl, group_id, store, room=room, skey=skey)
     raise ValueError(f"unknown pass: {name}")
 
 
@@ -127,34 +129,25 @@ def main(argv: list[str]) -> None:
         sys.exit(f"usage: cron.py [{'|'.join(PASSES)}]   (got {cmd!r})")
 
     engine = build_engine()
-    gl = GitLabClient(env("GITLAB_URL", required=True), env("GITLAB_TOKEN", required=True))
-    group_id = env("GITLAB_GROUP_ID", "3")
-
-    wanted = DAILY if cmd == "all" else (cmd,)
-
-    # Most passes work off the same "all open issues" snapshot — fetch it once.
-    issues = gl.group_issues(group_id, state="opened", scope="all")
     store = engine.store                      # shared DB (dedup + settings live together)
-    sched = engine.settings.schedule()        # admin-editable; falls back to env defaults
-    digest_sched = dict(anchor_days=sched["anchor_days"], holidays=sched["holidays"],
-                        skip_weekends=sched["skip_weekends"])
-    weekly = dict(weekly_day=sched["weekly_day"], holidays=sched["holidays"])
+    settings = engine.settings
+    today = dt.date.today()
+    wanted = DAILY if cmd == "all" else (cmd,)
+    url = env("GITLAB_URL", required=True)
+
+    # Host-cron fallback (when SCHEDULER_ENABLED=false): run the requested passes
+    # for every configured source. The host cron schedule decides *when*; digests
+    # send full on a pass's anchor day, a delta otherwise.
     try:
-        if "due" in wanted:
-            run_due_soon(engine, issues, store)
-        if "overdue" in wanted:
-            run_overdue(engine, issues, store)
-        if "digest" in wanted:
-            digests.personal(engine, issues, store, **digest_sched)
-        if "team" in wanted:
-            digests.team(engine, issues, store, **digest_sched)
-        if "triage" in wanted:
-            digests.triage(engine, issues, store, **weekly)
-        if "stale" in wanted:
-            digests.stale(engine, gl, group_id, store,
-                          days=int(env("STALE_DAYS", str(digests.STALE_DAYS))), **weekly)
-        if "metrics" in wanted:
-            digests.metrics(engine, gl, group_id, store)
+        for src in engine.sources.enabled():
+            gid = src.get("group_id")
+            if not gid:
+                continue
+            gl = GitLabClient(url, src.get("token", ""))
+            for name in wanted:
+                anchor = today.weekday() in settings.pass_schedule(name).get("anchor_days", [])
+                run_one(engine, gl, gid, store, name,
+                        anchor=anchor, room=src.get("room"), skey=src["id"])
     finally:
         store.close()
 

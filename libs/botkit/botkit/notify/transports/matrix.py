@@ -13,7 +13,8 @@ class MatrixTransport:
         self.identity = identity
 
     def dispatch(self, event, rule: dict, rendered: str, defaults: dict) -> dict:
-        room = rule.get("room_id") or defaults.get("room_id")
+        # event.room (per-source routing) wins, then a rule-pinned room, then default.
+        room = getattr(event, "room", None) or rule.get("room_id") or defaults.get("room_id")
         if not room:
             raise RuntimeError("room transport: no room_id (set env MATRIX_ROOM or defaults.room_id)")
 

@@ -12,7 +12,11 @@ import asyncio
 import datetime as dt
 import logging
 
+from botkit.config import env
+from botkit.gitlab import GitLabClient
+
 import cron
+import digests
 
 log = logging.getLogger("gitlab-notify.scheduler")
 TICK_SECONDS = 30
@@ -38,7 +42,7 @@ def due_now(cfg: dict, weekday: int, now_min: int) -> bool:
     return t <= now_min <= t + GRACE_MINUTES
 
 
-def tick(engine, gl, group_id: str) -> None:
+def tick(engine) -> None:
     s = engine.settings
     if not s.enabled():                          # global kill switch
         return
@@ -49,26 +53,35 @@ def tick(engine, gl, group_id: str) -> None:
     store = s.store
     if s.is_nonworking(iso):                      # holidays / weekends -> silent
         return
-    for name in cron.PASSES:
-        cfg = s.pass_schedule(name)
-        if not due_now(cfg, today.weekday(), now_min):
+    gitlab_url = env("GITLAB_URL", "")
+    # Each source = its own group + token + room; iterate them all.
+    for src in engine.sources.enabled():
+        gid = src.get("group_id")
+        if not gid:
             continue
-        if store.already_sent("sched", name, day=iso):   # already fired today
-            continue
-        anchor = today.weekday() in cfg.get("anchor_days", [])
-        try:
-            n = cron.run_one(engine, gl, group_id, store, name, anchor=anchor)
-            store.mark_sent("sched", name, day=iso)
-            log.info("scheduled pass %s fired -> %s sent", name, n)
-        except Exception:                          # noqa: BLE001 — one pass mustn't kill the loop
-            log.exception("scheduled pass %s failed", name)
+        gl = GitLabClient(gitlab_url, src.get("token", ""))
+        for name in cron.PASSES:
+            cfg = s.pass_schedule(name)
+            if not due_now(cfg, today.weekday(), now_min):
+                continue
+            schedkey = digests._ns(src["id"], name)
+            if store.already_sent("sched", schedkey, day=iso):   # already fired today (this source)
+                continue
+            anchor = today.weekday() in cfg.get("anchor_days", [])
+            try:
+                n = cron.run_one(engine, gl, gid, store, name,
+                                 anchor=anchor, room=src.get("room"), skey=src["id"])
+                store.mark_sent("sched", schedkey, day=iso)
+                log.info("scheduled %s/%s fired -> %s sent", src["id"], name, n)
+            except Exception:                      # noqa: BLE001 — one pass mustn't kill the loop
+                log.exception("scheduled pass %s/%s failed", src["id"], name)
 
 
-async def run_scheduler(engine, gl, group_id: str, stop: asyncio.Event) -> None:
+async def run_scheduler(engine, stop: asyncio.Event) -> None:
     log.info("scheduler started (tick %ss)", TICK_SECONDS)
     while not stop.is_set():
         try:
-            await asyncio.to_thread(tick, engine, gl, group_id)
+            await asyncio.to_thread(tick, engine)
         except Exception:                          # noqa: BLE001
             log.exception("scheduler tick failed")
         try:

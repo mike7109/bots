@@ -29,6 +29,10 @@ import cron
 log = logging.getLogger("gitlab-notify.admin")
 COOKIE = "admin_session"
 
+
+def _mask(token: str | None) -> str:
+    return ("…" + token[-4:]) if token else ""
+
 # Representative context for the template preview — populated for every template
 # variant (issue / due / overdue / digests / triage / stale / metrics) so the
 # operator sees roughly what a real message renders to.
@@ -95,10 +99,6 @@ def _invite_status(engine) -> dict:
 def create_admin_router(engine) -> APIRouter:
     router = APIRouter(prefix="/admin")
     settings = engine.settings
-    group_id = env("GITLAB_GROUP_ID", "3")
-
-    def _gl() -> GitLabClient:
-        return GitLabClient(env("GITLAB_URL", required=True), env("GITLAB_TOKEN", required=True))
 
     def _guard(session):
         if not _authed(session):
@@ -165,6 +165,14 @@ def create_admin_router(engine) -> APIRouter:
             "passes": list(cron.PASSES),
             "push_modes": list(PUSH_MODES),
             "stats": engine.store.log_stats(7),
+            "gitlab_url": env("GITLAB_URL", ""),
+            "sources": [
+                {"id": s["id"], "name": s.get("name"), "group_id": s.get("group_id"),
+                 "room": s.get("room"), "enabled": s.get("enabled", True),
+                 "full_path": s.get("full_path"), "group_name": s.get("group_name"),
+                 "token_masked": _mask(s.get("token")), "has_token": bool(s.get("token"))}
+                for s in engine.sources.all()
+            ],
         }
 
     @router.post("/api/global")
@@ -207,12 +215,21 @@ def create_admin_router(engine) -> APIRouter:
         _guard(admin_session)
         if name not in cron.PASSES:
             raise HTTPException(status_code=400, detail="unknown pass")
-        try:
-            sent = cron.run_one(engine, _gl(), group_id, settings.store, name, force=True)
-            return {"ok": True, "pass": name, "sent": sent}
-        except Exception as e:                   # noqa: BLE001
-            log.exception("manual trigger %s failed", name)
-            return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+        url = env("GITLAB_URL", "")
+        total, per = 0, []
+        for src in engine.sources.enabled():
+            if not src.get("group_id"):
+                continue
+            try:
+                gl = GitLabClient(url, src.get("token", ""))
+                n = cron.run_one(engine, gl, src["group_id"], settings.store, name,
+                                 force=True, room=src.get("room"), skey=src["id"])
+                total += n
+                per.append({"source": src["id"], "sent": n})
+            except Exception as e:               # noqa: BLE001 — one source mustn't fail the rest
+                log.exception("manual trigger %s for %s failed", name, src["id"])
+                per.append({"source": src["id"], "error": str(e)})
+        return {"ok": True, "pass": name, "sent": total, "per": per}
 
     @router.post("/api/rule/{event}")
     async def set_rule(event: str, request: Request, admin_session: str | None = Cookie(default=None)):
@@ -313,6 +330,45 @@ def create_admin_router(engine) -> APIRouter:
         body = await request.json()
         name = Path(body.get("name", "")).name
         settings.store.clear_state("template", name)   # back to the on-disk default
+        return {"ok": True}
+
+    # --- multi-group sources -------------------------------------------------
+    @router.post("/api/sources/validate")
+    async def validate_source(request: Request, admin_session: str | None = Cookie(default=None)):
+        _guard(admin_session)
+        body = await request.json()
+        token = body.get("token") or ""
+        if token.startswith("…") and body.get("id"):     # masked -> reuse stored token
+            existing = engine.sources.get(body["id"])
+            token = (existing or {}).get("token", "")
+        return engine.sources.validate(str(body.get("group_id", "")), token)
+
+    @router.post("/api/sources")
+    async def save_source(request: Request, admin_session: str | None = Cookie(default=None)):
+        _guard(admin_session)
+        body = await request.json()
+        gid = str(body.get("group_id", "")).strip()
+        if not gid or not (body.get("room") or "").strip():
+            return JSONResponse({"ok": False, "error": "нужны group_id и room"}, status_code=400)
+        sid = (body.get("id") or "").strip() or f"g{gid}"
+        token = body.get("token") or ""
+        if not token or token.startswith("…"):           # blank/masked -> keep stored token
+            token = (engine.sources.get(sid) or {}).get("token", "")
+        src = {"id": sid, "name": body.get("name") or sid, "group_id": gid,
+               "token": token, "room": body["room"].strip(),
+               "enabled": bool(body.get("enabled", True))}
+        # Auto-fill full_path/group_name so webhook routing works; best-effort.
+        if token:
+            v = engine.sources.validate(gid, token)
+            if v.get("ok"):
+                src["full_path"] = v.get("full_path")
+                src["group_name"] = v.get("group_name")
+        return {"ok": True, "source": {**engine.sources.upsert(src), "token": None}}
+
+    @router.delete("/api/sources/{sid}")
+    def delete_source(sid: str, admin_session: str | None = Cookie(default=None)):
+        _guard(admin_session)
+        engine.sources.delete(sid)
         return {"ok": True}
 
     return router

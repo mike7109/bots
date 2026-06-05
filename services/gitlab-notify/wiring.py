@@ -18,6 +18,7 @@ from botkit.store import Store
 
 import digests
 from settings import Settings
+from sources import Sources, seed_from_env
 
 HERE = Path(__file__).parent
 
@@ -62,10 +63,17 @@ def build_engine() -> Engine:
     }
     # When email is enabled later:
     #   transports["email"] = EmailTransport(host=env("SMTP_HOST"), ...)
+    # Multi-group sources (admin-managed). Seed the first one from env so an
+    # existing single-group deploy keeps working with no config.
+    sources = Sources(store, env("GITLAB_URL", ""))
+    seed_from_env(sources, group_id=env("GITLAB_GROUP_ID"),
+                  token=env("GITLAB_TOKEN"), room=config["defaults"].get("room_id"))
+
     engine = Engine(config, renderer, transports, identity=identity, settings=settings)
     # Stash shared handles so app.py (admin) and cron.py reuse one DB/settings/matrix.
     engine.store = store
     engine.settings = settings
+    engine.sources = sources
     engine.matrix = matrix
     engine.config = config
     engine.templates_dir = HERE / "templates"

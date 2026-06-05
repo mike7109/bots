@@ -111,6 +111,12 @@ class Store:
             self._db.execute("DELETE FROM state WHERE kind=? AND key=?", (kind, str(key)))
             self._db.commit()
 
+    def list_state(self, kind: str) -> dict:
+        """All (key -> value) rows for a kind — e.g. every configured source."""
+        with self._lock:
+            rows = self._db.execute("SELECT key, value FROM state WHERE kind=?", (kind,)).fetchall()
+        return {k: json.loads(v) for k, v in rows}
+
     # --- activity log + stats -------------------------------------------
     def log_event(self, kind, action, channel, status: str, detail: str = "") -> None:
         now = dt.datetime.now()

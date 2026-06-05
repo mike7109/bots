@@ -38,6 +38,10 @@ class GitLabClient:
         """List issues in a group (incl. subgroups). Params pass through to the API."""
         return self.get_paginated(f"/api/v4/groups/{group_id}/issues", **params)
 
+    def get_json(self, path: str, **params):
+        """Single GET returning parsed JSON (e.g. group info for access checks)."""
+        return self._get(path, **params).json()
+
     # --- GraphQL ----------------------------------------------------------
     def graphql(self, query: str, variables: dict | None = None) -> dict:
         resp = self._s.post(

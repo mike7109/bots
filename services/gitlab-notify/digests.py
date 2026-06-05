@@ -142,12 +142,18 @@ def _by_due(rows: list[dict]) -> list[dict]:
     return sorted(rows, key=lambda r: r["due"] or "")
 
 
-def _emit(engine, store, kind: str, dedup_key: str, extra: dict, assignees=None, *, day=None) -> int:
+def _ns(skey: str, key) -> str:
+    """Namespace a dedup/snapshot key by source so groups don't collide."""
+    return f"{skey}:{key}" if skey else str(key)
+
+
+def _emit(engine, store, kind: str, dedup_key: str, extra: dict, assignees=None,
+          *, day=None, room=None) -> int:
     """Build the digest Event, dispatch it, and mark it sent on success."""
     if store.already_sent(kind, dedup_key, day=day):
         log.info("%s [%s]: already sent today", kind, dedup_key)
         return 0
-    event = Event(kind=kind, action="digest", assignees=assignees or [], extra=extra)
+    event = Event(kind=kind, action="digest", assignees=assignees or [], extra=extra, room=room)
     result = engine.handle(event)
     if result.get("sent"):
         store.mark_sent(kind, dedup_key, day=day)
@@ -179,7 +185,8 @@ def _full_sections(rows: list[dict], today: str, horizon: str) -> list[dict]:
 
 
 def personal(engine, issues: list[dict], store, *, today: dt.date | None = None,
-             anchor_days=ANCHOR_DAYS, holidays=frozenset(), skip_weekends: bool = True) -> int:
+             anchor_days=ANCHOR_DAYS, holidays=frozenset(), skip_weekends: bool = True,
+             room=None, skey: str = "") -> int:
     """Per-assignee DM, delta-driven.
 
     Only writes when a person's issues actually changed (new / moved column /
@@ -204,11 +211,12 @@ def personal(engine, issues: list[dict], store, *, today: dt.date | None = None,
 
     sent = 0
     for login, items in sorted(by_user.items()):
-        if store.already_sent("digest_personal", login, day=iso):   # one DM per person per day
+        pkey = _ns(skey, login)
+        if store.already_sent("digest_personal", pkey, day=iso):   # one DM per person per day
             continue
         rows = [_row(i) for i in items]
         current = _snapshot(rows, iso, horizon)
-        prev = store.get_state("digest_personal", login)
+        prev = store.get_state("digest_personal", pkey)
 
         if is_anchor:
             extra = {"mode": "full", "date": iso, "total": len(rows),
@@ -216,7 +224,7 @@ def personal(engine, issues: list[dict], store, *, today: dt.date | None = None,
         elif prev is None:
             # First time we see this person off an anchor day: learn their
             # baseline silently, so the next change is a real delta, not "all new".
-            store.set_state("digest_personal", login, current)
+            store.set_state("digest_personal", pkey, current)
             continue
         else:
             changes = _diff(prev, current)
@@ -224,11 +232,11 @@ def personal(engine, issues: list[dict], store, *, today: dt.date | None = None,
                 continue                                    # nothing changed -> silent
             extra = {"mode": "delta", "date": iso, "changes": changes}
 
-        event = Event(kind="digest_personal", action="digest", assignees=[login], extra=extra)
+        event = Event(kind="digest_personal", action="digest", assignees=[login], extra=extra, room=room)
         result = engine.handle(event)
         if result.get("sent"):
-            store.mark_sent("digest_personal", login, day=iso)
-            store.set_state("digest_personal", login, current)
+            store.mark_sent("digest_personal", pkey, day=iso)
+            store.set_state("digest_personal", pkey, current)
             sent += 1
         else:
             log.warning("digest_personal [%s] not delivered: %s", login, result)
@@ -261,7 +269,8 @@ def _team_sections(rows: list[dict], today: str, horizon: str) -> list[dict]:
 
 
 def team(engine, issues: list[dict], store, *, today: dt.date | None = None,
-         anchor_days=ANCHOR_DAYS, holidays=frozenset(), skip_weekends: bool = True) -> int:
+         anchor_days=ANCHOR_DAYS, holidays=frozenset(), skip_weekends: bool = True,
+         room=None, skey: str = "") -> int:
     """Shared room standup digest, delta-driven (same rules as `personal`).
 
     Writes only when the group's issues changed, except on `anchor_days` where
@@ -276,11 +285,12 @@ def team(engine, issues: list[dict], store, *, today: dt.date | None = None,
     sec_horizon = (today + dt.timedelta(days=TEAM_SOON_DAYS)).isoformat()
     snap_horizon = (today + dt.timedelta(days=PERSONAL_SOON_DAYS)).isoformat()
 
+    gkey = _ns(skey, "group")
     rows = [_row(i) for i in issues]
     current = _snapshot(rows, iso, snap_horizon)
-    prev = store.get_state("digest_team", "group")
+    prev = store.get_state("digest_team", gkey)
 
-    if store.already_sent("digest_team", "group", day=iso):
+    if store.already_sent("digest_team", gkey, day=iso):
         return 0
     if is_anchor:
         sections = _team_sections(rows, iso, sec_horizon)
@@ -288,7 +298,7 @@ def team(engine, issues: list[dict], store, *, today: dt.date | None = None,
             return 0
         extra = {"mode": "full", "date": iso, "open_total": len(rows), "sections": sections}
     elif prev is None:
-        store.set_state("digest_team", "group", current)   # learn baseline silently
+        store.set_state("digest_team", gkey, current)   # learn baseline silently
         return 0
     else:
         changes = _diff(prev, current)
@@ -296,11 +306,11 @@ def team(engine, issues: list[dict], store, *, today: dt.date | None = None,
             return 0
         extra = {"mode": "delta", "date": iso, "changes": changes}
 
-    event = Event(kind="digest_team", action="digest", extra=extra)
+    event = Event(kind="digest_team", action="digest", extra=extra, room=room)
     result = engine.handle(event)
     if result.get("sent"):
-        store.mark_sent("digest_team", "group", day=iso)
-        store.set_state("digest_team", "group", current)
+        store.mark_sent("digest_team", gkey, day=iso)
+        store.set_state("digest_team", gkey, current)
         return 1
     log.warning("digest_team not delivered: %s", result)
     return 0
@@ -314,7 +324,7 @@ def _weekly_skip(today: dt.date | None, weekly_day: int, holidays) -> tuple[dt.d
 
 
 def triage(engine, issues: list[dict], store, *, today: dt.date | None = None,
-           weekly_day: int = WEEKLY_DAY, holidays=frozenset()) -> int:
+           weekly_day: int = WEEKLY_DAY, holidays=frozenset(), room=None, skey: str = "") -> int:
     """Shared room, weekly: issues that need a decision (unassigned / no deadline).
 
     A full overview (not a delta) — once a week you want the whole hygiene
@@ -337,11 +347,13 @@ def triage(engine, issues: list[dict], store, *, today: dt.date | None = None,
         log.info("triage digest: nothing to report")
         return 0
 
-    return _emit(engine, store, "triage", "group", {"sections": sections}, day=today.isoformat())
+    return _emit(engine, store, "triage", _ns(skey, "group"), {"sections": sections},
+                 day=today.isoformat(), room=room)
 
 
 def stale(engine, gl, group_id: str, store, days: int = STALE_DAYS, *,
-          today: dt.date | None = None, weekly_day: int = WEEKLY_DAY, holidays=frozenset()) -> int:
+          today: dt.date | None = None, weekly_day: int = WEEKLY_DAY, holidays=frozenset(),
+          room=None, skey: str = "") -> int:
     """Shared room, weekly: open issues untouched for `days` days (full overview)."""
     today, skip = _weekly_skip(today, weekly_day, holidays)
     if skip:
@@ -364,9 +376,9 @@ def stale(engine, gl, group_id: str, store, days: int = STALE_DAYS, *,
         log.info("stale digest: nothing to report")
         return 0
 
-    return _emit(engine, store, "stale", "group",
+    return _emit(engine, store, "stale", _ns(skey, "group"),
                  {"days": days, "sections": [{"emoji": "🕸", "title": "Без активности", "items": rows}]},
-                 day=today.isoformat())
+                 day=today.isoformat(), room=room)
 
 
 def _percentile(values: list[int], q: float) -> int | None:
@@ -387,7 +399,8 @@ def _median(values: list[int]) -> float | None:
     return ordered[mid] if n % 2 else (ordered[mid - 1] + ordered[mid]) / 2
 
 
-def metrics(engine, gl, group_id: str, store, window: int = METRICS_WINDOW) -> int:
+def metrics(engine, gl, group_id: str, store, window: int = METRICS_WINDOW,
+            *, room=None, skey: str = "") -> int:
     """Shared room: weekly issue-flow thermometer (Free-tier, Issues API only)."""
     today = _today()
     since = today - dt.timedelta(days=window)
@@ -413,4 +426,4 @@ def metrics(engine, gl, group_id: str, store, window: int = METRICS_WINDOW) -> i
     }
     # Metrics are a daily-stable snapshot; key by ISO week so it posts once a week.
     week_key = "%s-W%02d" % today.isocalendar()[:2]
-    return _emit(engine, store, "metrics", week_key, extra)
+    return _emit(engine, store, "metrics", _ns(skey, week_key), extra, room=room)

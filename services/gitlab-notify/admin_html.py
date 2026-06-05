@@ -101,6 +101,12 @@ HTML = r"""<!doctype html>
     </div>
   </div>
 
+  <!-- Группы -->
+  <div class="view" data-v="src">
+    <p class="hint" style="margin:0 0 14px">Какие GitLab-группы бот слушает и в какой чат шлёт. Вебхуки маршрутизируются по группе проекта; дайджесты опрашивают каждую группу своим токеном. Кнопка «Проверить доступ» дёргает GitLab API и показывает имя группы и число issue.</p>
+    <div id="srcCards"></div>
+  </div>
+
   <!-- Получатели -->
   <div class="view" data-v="users">
     <div class="card"><h2>Получатели</h2>
@@ -215,7 +221,7 @@ HTML = r"""<!doctype html>
 <div id="toast" class="toast"></div>
 <script>
 const DAYS=["Пн","Вт","Ср","Чт","Пт","Сб","Вс"];
-const TABS=[["dash","Дашборд"],["users","Получатели"],["sched","Рассылки"],["cal","Календарь"],["rules","Правила"],["tpl","Шаблоны"],["logs","Логи"]];
+const TABS=[["dash","Дашборд"],["src","Группы"],["users","Получатели"],["sched","Рассылки"],["cal","Календарь"],["rules","Правила"],["tpl","Шаблоны"],["logs","Логи"]];
 const PASS_INFO={
   due:{icon:'📅',title:'Дедлайн завтра',tpl:'due_soon',desc:'Напоминание в общую комнату об issue, у которых срок наступает завтра.'},
   overdue:{icon:'⏰',title:'Просрочки',tpl:'overdue',desc:'Личное напоминание исполнителю об его issue с прошедшим сроком.'},
@@ -281,6 +287,7 @@ async function load(){
   $('holAuto').checked=s.schedule.holidays_auto;
   $('holidays').value=(s.schedule.holidays||[]).join('\n');
   renderRules();
+  renderSources();
   $('tplSelect').innerHTML=s.templates.map(t=>`<option>${esc(t)}</option>`).join('');
   loadTpl();
 }
@@ -316,6 +323,55 @@ function renderUsers(){
     <td><select onchange="setUser('${login}',{push:this.value})">${S.push_modes.map(m=>`<option value="${m}" ${u.push===m?'selected':''}>${PUSHL[m]||m}</option>`).join('')}</select></td></tr>`).join('')
     ||'<tr><td colspan=5 class="mut">Никого не найдено.</td></tr>';
 }
+function srcCard(s){
+  s=s||{};const isNew=!s.id;
+  return `<div class="card" data-sid="${esc(s.id||'')}">
+    <div class="row" style="margin:0">
+      <b style="font-size:15px">${isNew?'➕ Новая группа':'🔗 '+esc(s.name||s.id)}</b>
+      <input class="sName" placeholder="Название" value="${esc(s.name||'')}" style="width:170px">
+      <span class="spacer"></span>
+      <label class="row" style="margin:0;gap:6px"><span class="mut" style="font-size:12px">вкл</span>
+        <span class="switch"><input type="checkbox" class="sEn" ${s.enabled!==false?'checked':''}><span class="slider"></span></span></label>
+    </div>
+    <div class="row" style="margin:10px 0 0"><span class="mut">GitLab группа ID:</span>
+      <input class="sGid" value="${esc(s.group_id||'')}" placeholder="напр. 12" style="width:90px">
+      <span class="mut">Токен:</span>
+      <input class="sTok" type="password" placeholder="${s.has_token?esc(s.token_masked)+' (не менять — пусто)':'glpat-…'}" style="width:180px">
+      <span class="mut">Комната:</span>
+      <input class="sRoom" value="${esc(s.room||'')}" placeholder="!room:server" style="width:220px"></div>
+    <div class="row" style="margin:10px 0 0">
+      <button class="sm" onclick="validateSrc(this)">🔌 Проверить доступ</button>
+      <button class="primary sm" onclick="saveSrc(this)">Сохранить</button>
+      ${isNew?'':`<button class="sm" onclick="deleteSrc('${esc(s.id)}',this)">Удалить</button>`}
+      <span class="spacer"></span><span class="srcRes" style="font-size:13px"></span></div>
+    ${s.full_path?`<div class="mut" style="font-size:12px;margin-top:8px">GitLab: <b>${esc(s.group_name||'')}</b> · <span class="mono">${esc(s.full_path)}</span> · вебхуки проектов этой группы → сюда</div>`:'<div class="mut" style="font-size:12px;margin-top:8px">Полный путь группы заполнится после «Проверить доступ»/«Сохранить» — без него вебхук-роутинг не сработает.</div>'}
+  </div>`;
+}
+function renderSources(){
+  const list=(S.sources||[]).map(srcCard).join('');
+  $('srcCards').innerHTML=list+srcCard({});   // + пустая карточка для добавления
+}
+function _srcBody(card){
+  const tok=card.querySelector('.sTok').value;
+  return {id:card.dataset.sid||'', name:card.querySelector('.sName').value,
+    group_id:card.querySelector('.sGid').value, token:tok||'…keep',
+    room:card.querySelector('.sRoom').value, enabled:card.querySelector('.sEn').checked};
+}
+async function validateSrc(btn){
+  const card=btn.closest('.card');const res=card.querySelector('.srcRes');
+  res.style.color='var(--mut)';res.textContent='проверяю…';
+  const b=_srcBody(card);
+  const r=await api('/sources/validate','POST',{id:b.id,group_id:b.group_id,token:b.token});
+  if(r.ok){res.style.color='var(--ok)';res.textContent=`✓ ${r.group_name||''} · ${r.full_path||''} · issue: ${r.issues==null?'?':r.issues}`;}
+  else{res.style.color='var(--bad)';res.textContent='✗ '+(r.error||'нет доступа');}
+}
+async function saveSrc(btn){
+  const card=btn.closest('.card');const res=card.querySelector('.srcRes');
+  const r=await api('/sources','POST',_srcBody(card));
+  if(r.ok){toast('Группа сохранена');load();}else{res.style.color='var(--bad)';res.textContent='✗ '+(r.error||'ошибка');}
+}
+async function deleteSrc(id,btn){if(!confirm('Удалить группу «'+id+'»? Бот перестанет её слушать.'))return;
+  await api('/sources/'+encodeURIComponent(id),'DELETE');toast('Группа удалена');load();}
 function renderRules(){
   $('rules').innerHTML=S.rules.map(r=>`<div class="card" style="padding:14px">
     <div class="row" style="margin:0"><div style="font-size:15px"><b>${esc(kindTitle(r.event))}</b> <span class="mut mono" style="font-size:11px">${esc(r.event)}</span>${r.enabled?'':' <span class="badge ignored">выключено</span>'}</div>
