@@ -62,6 +62,19 @@ def _labels_html(labels) -> Markup:
     return Markup(chips)
 
 
+def _safe_url(value) -> str:
+    """Neutralise dangerous URL schemes before interpolation into an `href`.
+    Returns the value unchanged only for http(s) absolute URLs or relative
+    `/...`/`#...` paths; anything else (e.g. `javascript:`, `data:`) -> "#".
+    Autoescape escapes quotes but does NOT block the scheme, so this is the
+    defence against a hostile URL sneaking into a link."""
+    s = str(value or "").strip()
+    low = s.lower()
+    if low.startswith(("http://", "https://")) or s.startswith(("/", "#")):
+        return s
+    return "#"
+
+
 def _ru_date(iso) -> str:
     """'2026-06-05' -> '5 июня'. Falls back to the raw value on any surprise."""
     try:
@@ -75,7 +88,7 @@ def _make_mentions(pill):
     """Natural-language list of @pills:
     1 -> "@A", 2 -> "@A и @B", 3+ -> "@A, @B и @C"."""
     def mentions(logins) -> Markup:
-        pills = [p for p in (str(pill(l)) for l in (logins or []) if l) if p]
+        pills = [p for p in (str(pill(login)) for login in (logins or []) if login) if p]
         if not pills:
             return Markup("")
         if len(pills) == 1:
@@ -133,6 +146,7 @@ class Renderer:
         self.env.filters["ru_action"] = lambda action: _RU_ACTION.get(action, action)
         self.env.filters["action_emoji"] = lambda action: _ACTION_EMOJI.get(action, "•")
         self.env.filters["ru_date"] = _ru_date
+        self.env.filters["safe_url"] = _safe_url   # block javascript:/data: in href
 
     def render(self, template: str, channel: str, ctx: dict, fmt: str = "html") -> str:
         tmpl = self.env.get_template(f"{template}.{channel}.{fmt}.j2")

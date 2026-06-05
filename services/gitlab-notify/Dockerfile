@@ -1,5 +1,8 @@
 # Build context = repo root (so the shared lib is available):
 #   docker build -f services/gitlab-notify/Dockerfile -t gitlab-notify .
+# For reproducible builds, pin the base image by digest
+# (python:3.12-slim@sha256:...); get the current digest with:
+#   docker buildx imagetools inspect python:3.12-slim
 FROM python:3.12-slim
 
 WORKDIR /app
@@ -12,9 +15,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends tzdata \
 # Shared library first (changes rarely -> better layer caching).
 COPY libs/botkit /app/libs/botkit
 RUN pip install --no-cache-dir /app/libs/botkit \
-    && pip install --no-cache-dir "fastapi>=0.115" "uvicorn[standard]>=0.34"
+    && pip install --no-cache-dir "fastapi>=0.115,<1" "uvicorn[standard]>=0.34,<1"
 
 # Service code (app, cron, normalize, wiring, config, templates).
+# This also ships static/ (admin CSS/JS), so the admin panel's assets are baked
+# into the image — no separate volume mount needed (they version with the code).
 COPY services/gitlab-notify /app/svc
 WORKDIR /app/svc
 

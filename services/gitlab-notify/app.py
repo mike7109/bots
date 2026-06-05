@@ -6,23 +6,25 @@ event to the engine.
 """
 import asyncio
 import logging
+import pathlib
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Header, Request
+from fastapi.staticfiles import StaticFiles
 
 from botkit.config import env
 from botkit.webhook import verify_token
 from admin import create_admin_router
 from normalize import normalize
 from scheduler import run_scheduler
-from wiring import build_engine
+from wiring import build_context
 
 logging.basicConfig(
     level=env("LOG_LEVEL", "INFO"),
     format="%(asctime)s %(levelname)s %(message)s",
 )
 
-engine = build_engine()   # webhook secret is read per-request from settings (DB over env)
+ctx = build_context()   # webhook secret is read per-request from settings (DB over env)
 
 
 @asynccontextmanager
@@ -30,7 +32,7 @@ async def lifespan(app: FastAPI):
     # Internal scheduler always runs; whether it actually fires is the admin
     # "Авторассылки" toggle (settings.scheduler_on) + the global kill switch.
     stop = asyncio.Event()
-    task = asyncio.create_task(run_scheduler(engine, stop))   # iterates sources itself
+    task = asyncio.create_task(run_scheduler(ctx, stop))   # iterates sources itself
     yield
     stop.set()
     task.cancel()
@@ -38,7 +40,18 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="gitlab-notify", lifespan=lifespan)
 # Web admin panel at /admin (gated by env ADMIN_PASSWORD; disabled if unset).
-app.include_router(create_admin_router(engine))
+# create_admin_router returns [public, protected]; the protected router carries a
+# require_admin dependency so every privileged route is authed by default.
+for _admin_router in create_admin_router(ctx):
+    app.include_router(_admin_router)
+
+# Admin CSS/JS as static files (was inline in admin_html.py — extracted so they
+# get editor highlighting + a JS syntax check in CI). PUBLIC by design: the login
+# page needs the stylesheet/script before auth, and neither asset is sensitive.
+# Different path from the /admin page + /admin/api/* routes, so no shadowing.
+app.mount("/admin/static",
+          StaticFiles(directory=str(pathlib.Path(__file__).parent / "static")),
+          name="admin-static")
 
 
 @app.get("/healthz")
@@ -48,7 +61,7 @@ def healthz():
 
 @app.post("/webhook")
 async def webhook(request: Request, x_gitlab_token: str = Header(default="")):
-    verify_token(x_gitlab_token, engine.settings.conn_value("webhook_secret"))
+    verify_token(x_gitlab_token, ctx.settings.conn_value("webhook_secret"))
     payload = await request.json()
 
     event = normalize(payload)
@@ -57,8 +70,8 @@ async def webhook(request: Request, x_gitlab_token: str = Header(default="")):
 
     # Multi-group routing: send to the matching source's room. No source for this
     # project's group -> nowhere configured to send, so ignore it.
-    src = engine.sources.match_path(event.project)
+    src = ctx.sources.match_path(event.project)
     if not src:
         return {"ignored": f"no source for project {event.project}"}
     event.room = src.get("room")
-    return engine.handle(event)
+    return ctx.engine.handle(event)

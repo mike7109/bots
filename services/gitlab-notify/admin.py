@@ -1,9 +1,16 @@
 """Web admin panel for the bot, served by the same FastAPI service.
 
 A single password (env ADMIN_PASSWORD) gates everything — the panel can message
-the whole team, so it must not be open. Auth is a signed session cookie derived
-from the password (no extra secret, no DB). If ADMIN_PASSWORD is unset the panel
-is disabled entirely.
+the whole team, so it must not be open. If ADMIN_PASSWORD is unset the panel is
+disabled entirely.
+
+Auth model (see auth.py): a successful password check mints a *signed, expiring*
+session token, signed with a per-deployment secret persisted in the state DB.
+The token carries its own expiry and can be revoked wholesale by rotating that
+secret — unlike the old static password-derived cookie. Auth is enforced
+correct-by-default: every privileged route lives on a router with a
+`require_admin` dependency, so a new route is protected unless it is explicitly
+placed on the public router.
 
 Everything the panel changes (kill switch, per-person mute/push, schedule) is
 written to the settings store (settings.py) and takes effect on the next
@@ -12,12 +19,11 @@ templates) are computed live.
 """
 from __future__ import annotations
 
-import hashlib
 import hmac
 import logging
 from pathlib import Path
 
-from fastapi import APIRouter, Cookie, HTTPException, Request
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from botkit.config import env
@@ -25,10 +31,29 @@ from botkit.gitlab import GitLabClient
 from botkit.matrix import MatrixClient
 from settings import PUSH_MODES, HAS_ANCHOR, weekday_names
 from admin_html import HTML as _HTML
+import auth
 import cron
+import keys
 
 log = logging.getLogger("gitlab-notify.admin")
 COOKIE = "admin_session"
+
+
+def _cookie_secure(request) -> bool:
+    """Whether to set the Secure flag on the session cookie.
+
+    Default: auto — Secure only when the request arrived over HTTPS. This avoids
+    a silent foot-gun: a Secure cookie set over plain HTTP to a *non*-localhost
+    host is accepted by the server but then refused by the browser on the next
+    request, so the operator looks permanently "logged out". On HTTPS we set
+    Secure for real protection; on the documented http://127.0.0.1 deploy the
+    cookie works (loopback isn't sniffable anyway). Operators can force it either
+    way with ADMIN_COOKIE_SECURE=1/0 — set =1 behind an HTTPS-terminating reverse
+    proxy that forwards as http (run uvicorn with --proxy-headers there)."""
+    override = env("ADMIN_COOKIE_SECURE")
+    if override is not None and override.strip() != "":
+        return override.strip().lower() not in ("0", "false", "no")
+    return request.url.scheme == "https"
 
 
 def _mask(token: str | None) -> str:
@@ -63,29 +88,17 @@ SAMPLE_CTX = {
 }
 
 
-def _expected_token() -> str | None:
-    pw = env("ADMIN_PASSWORD")
-    if not pw:
-        return None
-    return hmac.new(pw.encode(), b"admin-session-v1", hashlib.sha256).hexdigest()
-
-
-def _authed(session: str | None) -> bool:
-    expected = _expected_token()
-    return bool(expected) and bool(session) and hmac.compare_digest(session, expected)
-
-
-def _invite_status(engine) -> dict:
+def _invite_status(ctx) -> dict:
     """For each configured user: do we have a DM room, and did they accept it?"""
-    matrix = engine.matrix
+    matrix = ctx.matrix
     try:
         direct = matrix._direct_map()
     except Exception as e:                       # noqa: BLE001 — degrade gracefully
         log.warning("m.direct read failed: %s", e)
         direct = {}
     out = {}
-    for login, info in (engine.config.get("users") or {}).items():
-        mxid = engine.identity.matrix_id(login)
+    for login, info in (ctx.config.get("users") or {}).items():
+        mxid = ctx.identity.matrix_id(login)
         status = "none"
         rooms = direct.get(mxid) if mxid else None
         if rooms:
@@ -97,49 +110,91 @@ def _invite_status(engine) -> dict:
     return out
 
 
-def create_admin_router(engine) -> APIRouter:
-    router = APIRouter(prefix="/admin")
-    settings = engine.settings
+def create_admin_router(ctx) -> list[APIRouter]:
+    """Build the admin panel routers.
 
-    def _guard(session):
-        if not _authed(session):
+    Returns TWO routers, both prefixed "/admin":
+      - public: the page, /api/login, /api/logout (no auth — that's how you log in)
+      - protected: every other /api/* route, gated by the `require_admin`
+        dependency so auth is enforced centrally (correct-by-default — a new
+        protected route can't accidentally ship unauthenticated).
+    app.py includes both.
+    """
+    settings = ctx.settings
+    store = ctx.store
+
+    # Weak-password nudge (once, at build time). Don't block startup — the panel
+    # may legitimately be disabled (no password) on a fresh boot.
+    pw = env("ADMIN_PASSWORD")
+    if pw and len(pw) < 12:
+        log.warning("ADMIN_PASSWORD is short (%d chars) — use a long random value "
+                    "(the panel can message the whole team).", len(pw))
+
+    # Per-IP login throttle, shared across requests for the life of the process.
+    throttle = auth.LoginThrottle()
+
+    def require_admin(admin_session: str | None = Cookie(default=None)) -> None:
+        """FastAPI dependency: 401 unless the cookie holds a valid session token.
+        Attached to the protected router so every route on it is authed."""
+        if not auth.verify_session(admin_session, auth.get_or_create_secret(store)):
             raise HTTPException(status_code=401, detail="auth required")
 
-    @router.get("", response_class=HTMLResponse)
+    public = APIRouter(prefix="/admin")
+    router = APIRouter(prefix="/admin", dependencies=[Depends(require_admin)])
+
+    @public.get("", response_class=HTMLResponse)
     def page():
         return HTMLResponse(_HTML)
 
-    @router.post("/api/login")
+    @public.post("/api/login")
     async def login(request: Request):
-        body = await request.json()
-        expected = _expected_token()
-        if not expected:
+        pw = env("ADMIN_PASSWORD")
+        if not pw:
             return JSONResponse({"error": "admin disabled (no ADMIN_PASSWORD)"}, status_code=503)
-        if not hmac.compare_digest(
-            hmac.new((body.get("password") or "").encode(), b"admin-session-v1", hashlib.sha256).hexdigest(),
-            expected,
-        ):
+        # Per-IP lockout: blunt the online brute-force of the single shared
+        # password. request.client may be None behind some test transports.
+        ip = request.client.host if request.client else "?"
+        if throttle.is_locked(ip):
+            retry = int(throttle.retry_after(ip)) + 1
+            return JSONResponse(
+                {"error": f"слишком много попыток, подождите {retry} с"},
+                status_code=429, headers={"Retry-After": str(retry)})
+        body = await request.json()
+        # Constant-time password compare (no timing oracle on the shared secret).
+        if not hmac.compare_digest((body.get("password") or "").encode(), pw.encode()):
+            throttle.record_failure(ip)
             return JSONResponse({"error": "неверный пароль"}, status_code=401)
+        throttle.reset(ip)   # clean slate after a good login
+        token = auth.mint_session(auth.get_or_create_secret(store))
         resp = JSONResponse({"ok": True})
-        resp.set_cookie(COOKIE, expected, httponly=True, samesite="lax", max_age=86400 * 7)
+        # secure: localhost is a secure context even over http (see _cookie_secure).
+        # samesite=strict: the cookie isn't sent on cross-site requests (CSRF guard).
+        resp.set_cookie(COOKIE, token, httponly=True, samesite="strict",
+                        secure=_cookie_secure(request), max_age=auth.SESSION_TTL)
         return resp
 
-    @router.post("/api/logout")
+    @public.post("/api/logout")
     def logout():
         resp = JSONResponse({"ok": True})
         resp.delete_cookie(COOKIE)
         return resp
 
     @router.get("/api/state")
-    def state(admin_session: str | None = Cookie(default=None)):
-        _guard(admin_session)
+    def state():
         g = settings.get_global()
-        users = _invite_status(engine)
+        users = _invite_status(ctx)
         for login, u in users.items():
             u.update(settings.user_pref(login))
-        templates = sorted(p.name for p in engine.templates_dir.glob("*.j2") if not p.name.startswith("_"))
+        templates = sorted(p.name for p in ctx.templates_dir.glob("*.j2") if not p.name.startswith("_"))
+        # Last run per enabled source × pass — so the dashboard can show when a
+        # scheduled pass last fired (and whether it failed).
+        last_runs = {}
+        for src in ctx.sources.enabled():
+            for pname in cron.PASSES:
+                schedkey = keys.ns(src["id"], pname)
+                last_runs[schedkey] = store.last_run(schedkey)
         rules = []
-        for r in engine.config.get("rules", []):
+        for r in ctx.config.get("rules", []):
             ov = settings.rule_override(r.get("event")) or {}
             rules.append({
                 "event": r.get("event"), "actions": r.get("actions"),
@@ -166,7 +221,9 @@ def create_admin_router(engine) -> APIRouter:
             "templates": templates,
             "passes": list(cron.PASSES),
             "push_modes": list(PUSH_MODES),
-            "stats": engine.store.log_stats(7),
+            "stats": ctx.store.log_stats(7),
+            "alerts": settings.get_alerts(),
+            "last_runs": last_runs,
             "conn": (lambda c: {
                 "matrix_homeserver": c["matrix_homeserver"],
                 "matrix_token_masked": _mask(c["matrix_token"]), "has_matrix_token": bool(c["matrix_token"]),
@@ -179,21 +236,31 @@ def create_admin_router(engine) -> APIRouter:
                  "room": s.get("room"), "enabled": s.get("enabled", True),
                  "full_path": s.get("full_path"), "group_name": s.get("group_name"),
                  "token_masked": _mask(s.get("token")), "has_token": bool(s.get("token"))}
-                for s in engine.sources.all()
+                for s in ctx.sources.all()
             ],
         }
 
     @router.post("/api/global")
-    async def set_global(request: Request, admin_session: str | None = Cookie(default=None)):
-        _guard(admin_session)
+    async def set_global(request: Request):
         patch = await request.json()
         allowed = {"enabled", "scheduler_on", "anchor_days", "weekly_day",
                    "skip_weekends", "holidays", "holidays_auto"}
         return settings.update_global({k: v for k, v in patch.items() if k in allowed})
 
+    @router.post("/api/alerts")
+    async def set_alerts(request: Request):
+        body = await request.json()
+        patch = {}
+        if "enabled" in body:
+            patch["enabled"] = bool(body["enabled"])
+        if isinstance(body.get("engineers"), list):
+            known = set(ctx.config.get("users", {}) or {})
+            # Silently drop unknown logins — only configured users can be alerted.
+            patch["engineers"] = [str(e) for e in body["engineers"] if str(e) in known]
+        return settings.update_alerts(patch)
+
     @router.post("/api/pass/{name}")
-    async def set_pass(name: str, request: Request, admin_session: str | None = Cookie(default=None)):
-        _guard(admin_session)
+    async def set_pass(name: str, request: Request):
         if name not in cron.PASSES:
             raise HTTPException(status_code=400, detail="unknown pass")
         body = await request.json()
@@ -214,8 +281,7 @@ def create_admin_router(engine) -> APIRouter:
         return settings.update_pass(name, clean)
 
     @router.post("/api/user/{login}")
-    async def set_user(login: str, request: Request, admin_session: str | None = Cookie(default=None)):
-        _guard(admin_session)
+    async def set_user(login: str, request: Request):
         patch = await request.json()
         clean = {}
         if "muted" in patch:
@@ -225,18 +291,17 @@ def create_admin_router(engine) -> APIRouter:
         return settings.update_user(login, clean)
 
     @router.post("/api/trigger/{name}")
-    def trigger(name: str, admin_session: str | None = Cookie(default=None)):
-        _guard(admin_session)
+    def trigger(name: str):
         if name not in cron.PASSES:
             raise HTTPException(status_code=400, detail="unknown pass")
         url = settings.conn_value("gitlab_url")
         total, per = 0, []
-        for src in engine.sources.enabled():
+        for src in ctx.sources.enabled():
             if not src.get("group_id"):
                 continue
             try:
                 gl = GitLabClient(url, src.get("token", ""))
-                n = cron.run_one(engine, gl, src["group_id"], settings.store, name,
+                n = cron.run_one(ctx.engine, gl, src["group_id"], ctx.store, name,
                                  force=True, room=src.get("room"), skey=src["id"])
                 total += n
                 per.append({"source": src["id"], "sent": n})
@@ -246,8 +311,7 @@ def create_admin_router(engine) -> APIRouter:
         return {"ok": True, "pass": name, "sent": total, "per": per}
 
     @router.post("/api/rule/{event}")
-    async def set_rule(event: str, request: Request, admin_session: str | None = Cookie(default=None)):
-        _guard(admin_session)
+    async def set_rule(event: str, request: Request):
         body = await request.json()
         patch = {}
         if "enabled" in body:
@@ -257,64 +321,58 @@ def create_admin_router(engine) -> APIRouter:
         return settings.update_rule(event, patch)
 
     @router.get("/api/logs")
-    def logs(limit: int = 100, status: str | None = None,
-             admin_session: str | None = Cookie(default=None)):
-        _guard(admin_session)
-        return {"rows": settings.store.recent_log(min(limit, 500), status),
-                "stats": settings.store.log_stats(7)}
+    def logs(limit: int = 100, status: str | None = None):
+        return {"rows": store.recent_log(min(limit, 500), status),
+                "stats": store.log_stats(7)}
 
     @router.get("/api/example")
-    def example(template: str, admin_session: str | None = Cookie(default=None)):
-        _guard(admin_session)
+    def example(template: str):
         try:
-            return {"ok": True, "html": engine.renderer.render(template, "matrix", SAMPLE_CTX)}
+            return {"ok": True, "html": ctx.renderer.render(template, "matrix", SAMPLE_CTX)}
         except Exception as e:                       # noqa: BLE001
             return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
     @router.post("/api/template/preview")
-    async def preview(request: Request, admin_session: str | None = Cookie(default=None)):
-        _guard(admin_session)
+    async def preview(request: Request):
         body = await request.json()
         try:
-            html = engine.renderer.render_string(body.get("content", ""), SAMPLE_CTX)
+            html = ctx.renderer.render_string(body.get("content", ""), SAMPLE_CTX)
             return {"ok": True, "html": html}
         except Exception as e:                       # noqa: BLE001 — show the Jinja error
             return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
     @router.post("/api/invite-blast")
-    def invite_blast(admin_session: str | None = Cookie(default=None)):
+    def invite_blast():
         """Post one message to the shared room @-tagging everyone who hasn't
         accepted the bot's DM invite, asking them to connect — and make sure a
         standing DM invite exists for each."""
-        _guard(admin_session)
-        room = (engine.config.get("defaults") or {}).get("room_id")
+        room = (ctx.config.get("defaults") or {}).get("room_id")
         if not room:
             return JSONResponse({"ok": False, "error": "не задана общая комната (MATRIX_ROOM)"},
                                 status_code=400)
         targets = []
-        for login, info in _invite_status(engine).items():
+        for login, info in _invite_status(ctx).items():
             if info["invite"] != "accepted" and info["mxid"]:
                 try:
-                    engine.matrix.get_or_create_dm(info["mxid"])   # ensure invite exists
+                    ctx.matrix.get_or_create_dm(info["mxid"])   # ensure invite exists
                 except Exception:                                  # noqa: BLE001
                     log.warning("could not create DM for %s", login)
                 targets.append((login, info["mxid"]))
         if not targets:
             return {"ok": True, "pinged": [], "note": "все уже приняли бота"}
-        pills = " ".join(str(engine.identity.matrix_pill(login)) for login, _ in targets)
+        pills = " ".join(str(ctx.identity.matrix_pill(login)) for login, _ in targets)
         html = (f"🔔 <b>Подключите бота</b><br>{pills} — примите приглашение бота в личку, "
                 "чтобы получать персональные напоминания и дайджесты приватно. "
                 "Откройте DM-инвайт от бота и нажмите «Принять».")
-        engine.matrix.send_html(room, html, mention_user_ids=[m for _, m in targets], notice=False)
+        ctx.matrix.send_html(room, html, mention_user_ids=[m for _, m in targets], notice=False)
         return {"ok": True, "pinged": [login for login, _ in targets]}
 
     @router.get("/api/template")
-    def get_template(name: str, admin_session: str | None = Cookie(default=None)):
-        _guard(admin_session)
-        path = engine.templates_dir / Path(name).name
+    def get_template(name: str):
+        path = ctx.templates_dir / Path(name).name
         if not path.exists():
             raise HTTPException(status_code=404, detail="not found")
-        override = settings.store.get_state("template", path.name)   # admin edit (DB), if any
+        override = store.get_state("template", path.name)   # admin edit (DB), if any
         return {
             "name": path.name,
             "content": override if override is not None else path.read_text(encoding="utf-8"),
@@ -323,43 +381,39 @@ def create_admin_router(engine) -> APIRouter:
         }
 
     @router.post("/api/template")
-    async def save_template(request: Request, admin_session: str | None = Cookie(default=None)):
-        _guard(admin_session)
+    async def save_template(request: Request):
         body = await request.json()
-        path = engine.templates_dir / Path(body.get("name", "")).name
+        path = ctx.templates_dir / Path(body.get("name", "")).name
         if not path.exists():                     # only edit known templates
             raise HTTPException(status_code=404, detail="not found")
         content = body.get("content", "")
         try:
-            engine.renderer.env.from_string(content)   # reject broken Jinja before it ships
+            ctx.renderer.env.from_string(content)   # reject broken Jinja before it ships
         except Exception as e:                          # noqa: BLE001
             return JSONResponse({"ok": False, "error": f"{type(e).__name__}: {e}"}, status_code=400)
         # Save as a DB override (templates on disk stay read-only / immutable).
-        settings.store.set_state("template", path.name, content)
+        store.set_state("template", path.name, content)
         return {"ok": True}
 
     @router.post("/api/template/reset")
-    async def reset_template(request: Request, admin_session: str | None = Cookie(default=None)):
-        _guard(admin_session)
+    async def reset_template(request: Request):
         body = await request.json()
         name = Path(body.get("name", "")).name
-        settings.store.clear_state("template", name)   # back to the on-disk default
+        store.clear_state("template", name)   # back to the on-disk default
         return {"ok": True}
 
     # --- multi-group sources -------------------------------------------------
     @router.post("/api/sources/validate")
-    async def validate_source(request: Request, admin_session: str | None = Cookie(default=None)):
-        _guard(admin_session)
+    async def validate_source(request: Request):
         body = await request.json()
         token = body.get("token") or ""
         if token.startswith("…") and body.get("id"):     # masked -> reuse stored token
-            existing = engine.sources.get(body["id"])
+            existing = ctx.sources.get(body["id"])
             token = (existing or {}).get("token", "")
-        return engine.sources.validate(str(body.get("group_id", "")), token)
+        return ctx.sources.validate(str(body.get("group_id", "")), token)
 
     @router.post("/api/sources")
-    async def save_source(request: Request, admin_session: str | None = Cookie(default=None)):
-        _guard(admin_session)
+    async def save_source(request: Request):
         body = await request.json()
         gid = str(body.get("group_id", "")).strip()
         if not gid or not (body.get("room") or "").strip():
@@ -367,28 +421,26 @@ def create_admin_router(engine) -> APIRouter:
         sid = (body.get("id") or "").strip() or f"g{gid}"
         token = body.get("token") or ""
         if not token or token.startswith("…"):           # blank/masked -> keep stored token
-            token = (engine.sources.get(sid) or {}).get("token", "")
+            token = (ctx.sources.get(sid) or {}).get("token", "")
         src = {"id": sid, "name": body.get("name") or sid, "group_id": gid,
                "token": token, "room": body["room"].strip(),
                "enabled": bool(body.get("enabled", True))}
         # Auto-fill full_path/group_name so webhook routing works; best-effort.
         if token:
-            v = engine.sources.validate(gid, token)
+            v = ctx.sources.validate(gid, token)
             if v.get("ok"):
                 src["full_path"] = v.get("full_path")
                 src["group_name"] = v.get("group_name")
-        return {"ok": True, "source": {**engine.sources.upsert(src), "token": None}}
+        return {"ok": True, "source": {**ctx.sources.upsert(src), "token": None}}
 
     @router.delete("/api/sources/{sid}")
-    def delete_source(sid: str, admin_session: str | None = Cookie(default=None)):
-        _guard(admin_session)
-        engine.sources.delete(sid)
+    def delete_source(sid: str):
+        ctx.sources.delete(sid)
         return {"ok": True}
 
     # --- connection settings (Matrix / webhook / GitLab) ---------------------
     @router.post("/api/conn")
-    async def set_conn(request: Request, admin_session: str | None = Cookie(default=None)):
-        _guard(admin_session)
+    async def set_conn(request: Request):
         body = await request.json()
         patch = {}
         for f in ("matrix_homeserver", "matrix_token", "webhook_secret", "gitlab_url"):
@@ -396,13 +448,12 @@ def create_admin_router(engine) -> APIRouter:
                 patch[f] = body[f]                  # skip masked (unchanged) secrets
         settings.update_conn(patch)
         if "matrix_homeserver" in patch or "matrix_token" in patch:   # apply to live client
-            engine.matrix.reconfigure(settings.conn_value("matrix_homeserver"),
-                                      settings.conn_value("matrix_token"))
+            ctx.matrix.reconfigure(settings.conn_value("matrix_homeserver"),
+                                   settings.conn_value("matrix_token"))
         return {"ok": True}
 
     @router.post("/api/conn/check-matrix")
-    async def check_matrix(request: Request, admin_session: str | None = Cookie(default=None)):
-        _guard(admin_session)
+    async def check_matrix(request: Request):
         body = await request.json()
         hs = body.get("homeserver") or settings.conn_value("matrix_homeserver")
         tok = body.get("token") or ""
@@ -416,8 +467,7 @@ def create_admin_router(engine) -> APIRouter:
             return {"ok": False, "error": str(e)}
 
     @router.get("/api/health")
-    def health(admin_session: str | None = Cookie(default=None)):
-        _guard(admin_session)
+    def health():
         checks = []
 
         def add(name, ok, detail=""):
@@ -426,7 +476,7 @@ def create_admin_router(engine) -> APIRouter:
         conn = settings.get_conn()
         bot_mxid = None
         try:
-            bot_mxid = engine.matrix.user_id
+            bot_mxid = ctx.matrix.user_id
             add("Matrix-подключение", True, f"бот {bot_mxid}")
         except Exception as e:                       # noqa: BLE001
             add("Matrix-подключение", False, f"токен/хост не работают: {e}")
@@ -434,18 +484,18 @@ def create_admin_router(engine) -> APIRouter:
             "задан" if conn["webhook_secret"] else "не задан — вебхуки отклоняются")
         add("GitLab URL", bool(conn["gitlab_url"]), conn["gitlab_url"] or "не задан")
 
-        srcs = engine.sources.enabled()
+        srcs = ctx.sources.enabled()
         add("Группы (источники)", len(srcs) > 0,
             f"включено: {len(srcs)}" if srcs else "ни одной — добавь во вкладке «Группы»")
         for s in srcs:
             label = s.get("name") or s["id"]
-            v = engine.sources.validate(str(s.get("group_id", "")), s.get("token", ""))
+            v = ctx.sources.validate(str(s.get("group_id", "")), s.get("token", ""))
             add(f"«{label}»: доступ к GitLab", v.get("ok"),
                 f"{v.get('group_name')} · issue {v.get('issues')}" if v.get("ok") else v.get("error", "нет доступа"))
             if s.get("room"):
                 if bot_mxid:
                     try:
-                        m = engine.matrix.membership(s["room"], bot_mxid)
+                        m = ctx.matrix.membership(s["room"], bot_mxid)
                         add(f"«{label}»: бот в комнате", m == "join",
                             "в комнате" if m == "join" else f"не вступил (membership={m}) — пригласи бота")
                     except Exception as e:           # noqa: BLE001
@@ -458,4 +508,4 @@ def create_admin_router(engine) -> APIRouter:
         return {"ok": all(c["ok"] for c in checks), "checks": checks,
                 "configured": all(c["ok"] for c in checks)}
 
-    return router
+    return [public, router]

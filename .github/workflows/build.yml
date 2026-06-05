@@ -7,6 +7,29 @@ on:
   workflow_dispatch:
 
 jobs:
+  # Gate the build on the network-free unit tests + lint. If this fails, nothing
+  # gets built or pushed — the bot's core promise (don't lose a task / don't
+  # double-ping) stays covered on every push.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install deps
+        run: pip install -e libs/botkit pytest ruff "fastapi>=0.115" "uvicorn[standard]>=0.34"
+      - name: Lint
+        run: ruff check .
+      - name: Config sanity (config.yaml parses)
+        run: python -c "import yaml; yaml.safe_load(open('services/gitlab-notify/config.yaml'))"
+      - name: Tests
+        run: python -m pytest -q
+      # ubuntu-latest ships node — syntax-check the extracted admin JS so a broken
+      # edit to static/admin.js (now a real file, not an inline string) fails CI.
+      - name: Admin JS syntax check
+        run: node --check services/gitlab-notify/static/admin.js
+
   # Figure out which services changed so we only rebuild those (a change under
   # libs/ rebuilds everything that depends on the shared lib).
   changes:
@@ -28,7 +51,7 @@ jobs:
               - 'libs/**'
 
   build:
-    needs: changes
+    needs: [test, changes]      # tests must pass before anything is built/pushed
     runs-on: ubuntu-latest
     permissions:
       contents: read

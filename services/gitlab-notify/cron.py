@@ -22,11 +22,12 @@ import logging
 import sys
 
 import digests
+import keys
 from botkit.config import env
 from botkit.gitlab import GitLabClient
 from botkit.notify.event import Event
 from botkit.store import Store
-from wiring import build_engine
+from wiring import build_context
 
 log = logging.getLogger("gitlab-notify.cron")
 
@@ -53,19 +54,36 @@ def _event(issue: dict, *, kind: str, action: str, room=None) -> Event:
     )
 
 
-def run_due_soon(engine, issues: list[dict], store: Store, *, room=None, skey: str = "") -> int:
-    tomorrow = (dt.date.today() + dt.timedelta(days=1)).isoformat()
+def _remind(engine, issues: list[dict], store: Store, *, kind: str, action: str,
+            due_predicate, room=None, skey: str = "", warn_undelivered: bool = False) -> int:
+    """Filter -> per-day dedup -> handle -> mark loop, shared by the reminders.
+
+    `due_predicate(due)` selects which issues to remind on (due-tomorrow for the
+    soon pass, past-due for overdue). The dedup key is the global issue id
+    namespaced by source (`keys.ns`), so a second run the same day is a no-op and
+    two groups sharing an id don't collide. `warn_undelivered` logs each issue
+    the engine failed to deliver (overdue only, matching the original).
+    """
     sent = 0
     for issue in issues:
-        if issue.get("due_date") != tomorrow:
+        if not due_predicate(issue.get("due_date")):
             continue
-        key = digests._ns(skey, issue.get("id"))
-        if store.already_sent("due_soon", key):
+        key = keys.ns(skey, issue.get("id"))   # global issue id — stable across renames
+        if store.already_sent(kind, key):
             continue
-        result = engine.handle(_event(issue, kind="due_soon", action="due", room=room))
+        result = engine.handle(_event(issue, kind=kind, action=action, room=room))
         if result.get("sent"):
-            store.mark_sent("due_soon", key)
+            store.mark_sent(kind, key)
             sent += 1
+        elif warn_undelivered:
+            log.warning("overdue #%s not delivered: %s", issue.get("iid"), result)
+    return sent
+
+
+def run_due_soon(engine, issues: list[dict], store: Store, *, room=None, skey: str = "") -> int:
+    tomorrow = (dt.date.today() + dt.timedelta(days=1)).isoformat()
+    sent = _remind(engine, issues, store, kind=keys.DUE_SOON, action="due",
+                   due_predicate=lambda due: due == tomorrow, room=room, skey=skey)
     log.info("due tomorrow (%s): %d reminder(s) sent", tomorrow, sent)
     return sent
 
@@ -73,20 +91,9 @@ def run_due_soon(engine, issues: list[dict], store: Store, *, room=None, skey: s
 def run_overdue(engine, issues: list[dict], store: Store, *, room=None, skey: str = "") -> int:
     """Open issues whose due_date is already in the past -> DM, once per day."""
     today = dt.date.today().isoformat()
-    sent = 0
-    for issue in issues:
-        due = issue.get("due_date")
-        if not due or due >= today:
-            continue
-        key = digests._ns(skey, issue.get("id"))  # global issue id — stable across renames
-        if store.already_sent("overdue", key):
-            continue
-        result = engine.handle(_event(issue, kind="overdue", action="overdue", room=room))
-        if result.get("sent"):
-            store.mark_sent("overdue", key)
-            sent += 1
-        else:
-            log.warning("overdue #%s not delivered: %s", issue.get("iid"), result)
+    sent = _remind(engine, issues, store, kind=keys.OVERDUE, action="overdue",
+                   due_predicate=lambda due: bool(due) and due < today,
+                   room=room, skey=skey, warn_undelivered=True)
     log.info("overdue (before %s): %d reminder(s) sent", today, sent)
     return sent
 
@@ -124,31 +131,52 @@ def run_one(engine, gl, group_id: str, store, name: str, *,
 
 
 def main(argv: list[str]) -> None:
-    cmd = argv[0] if argv else "all"
+    args = list(argv)
+    force = "--force" in args                  # let host-cron override the owner check
+    args = [a for a in args if a != "--force"]
+    cmd = args[0] if args else "all"
     if cmd not in ("all", *PASSES):
-        sys.exit(f"usage: cron.py [{'|'.join(PASSES)}]   (got {cmd!r})")
+        sys.exit(f"usage: cron.py [--force] [{'|'.join(PASSES)}]   (got {cmd!r})")
 
-    engine = build_engine()
-    store = engine.store                      # shared DB (dedup + settings live together)
-    settings = engine.settings
+    ctx = build_context()
+    store = ctx.store                         # shared DB (dedup + settings live together)
+    settings = ctx.settings
     today = dt.date.today()
+    today_iso = today.isoformat()
     wanted = DAILY if cmd == "all" else (cmd,)
     url = settings.conn_value("gitlab_url")
 
-    # Host-cron fallback (if you drive cron.py from host cron instead of the
-    # built-in scheduler): run the requested passes
-    # for every configured source. The host cron schedule decides *when*; digests
-    # send full on a pass's anchor day, a delta otherwise.
+    # Single schedule owner: if «Авторассылки» (the in-process scheduler) is on,
+    # IT owns the schedule. Host-cron is only meant for when that's off — running
+    # both would double-send in the network window. So bail out (exit 0) unless
+    # --force is passed.
+    if settings.get_global().get("scheduler_on", True) and not force:
+        log.warning("scheduler_on=True: in-process scheduler owns the schedule; "
+                    "host-cron exiting without sending (use --force to override)")
+        store.close()
+        return
+
+    # Host-cron fallback (when «Авторассылки» is off, or forced): run the
+    # requested passes for every configured source. Even when forced we honour +
+    # write the SAME `sched` ledger the scheduler uses, so the two coordinate and
+    # never double-send the same pass on the same day. Digests send full on a
+    # pass's anchor day, a delta otherwise.
     try:
-        for src in engine.sources.enabled():
+        for src in ctx.sources.enabled():
             gid = src.get("group_id")
             if not gid:
                 continue
             gl = GitLabClient(url, src.get("token", ""))
             for name in wanted:
+                schedkey = keys.ns(src["id"], name)
+                if store.already_sent(keys.SCHED, schedkey, day=today_iso):
+                    log.info("cron %s/%s: already fired today — skip", src["id"], name)
+                    continue
                 anchor = today.weekday() in settings.pass_schedule(name).get("anchor_days", [])
-                run_one(engine, gl, gid, store, name,
+                run_one(ctx.engine, gl, gid, store, name,
                         anchor=anchor, room=src.get("room"), skey=src["id"])
+                store.mark_sent(keys.SCHED, schedkey, day=today_iso)
+                store.record_run(schedkey, today_iso, ok=True)
     finally:
         store.close()
 

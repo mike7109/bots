@@ -16,14 +16,15 @@ from botkit.notify.transports.matrix import MatrixTransport
 from botkit.notify.transports.matrix_direct import MatrixDirectTransport
 from botkit.store import Store
 
-import digests
+from alerts import Alerter
+from context import AppContext
 from settings import Settings
 from sources import Sources, seed_from_env
 
 HERE = Path(__file__).parent
 
 
-def build_engine() -> Engine:
+def build_context() -> AppContext:
     config = load_yaml(env("CONFIG_PATH", str(HERE / "config.yaml")))
 
     # Rooms are per-source now (admin-managed); config.defaults.room_id is only a
@@ -57,11 +58,19 @@ def build_engine() -> Engine:
                   room=env("MATRIX_ROOM") or config["defaults"].get("room_id"))
 
     engine = Engine(config, renderer, transports, identity=identity, settings=settings)
-    # Stash shared handles so app.py (admin) and cron.py reuse one DB/settings/matrix.
-    engine.store = store
-    engine.settings = settings
-    engine.sources = sources
-    engine.matrix = matrix
-    engine.config = config
-    engine.templates_dir = HERE / "templates"
-    return engine
+    # Operator alerting: DM engineers when a scheduled pass throws (see alerts.py).
+    alerter = Alerter(matrix, identity, settings, store)
+    # Explicit container: app.py (admin) and cron.py reuse one DB/settings/matrix
+    # via ctx instead of monkey-patched engine attributes (see context.py).
+    return AppContext(
+        engine=engine,
+        store=store,
+        settings=settings,
+        sources=sources,
+        matrix=matrix,
+        identity=identity,
+        renderer=renderer,
+        config=config,
+        templates_dir=HERE / "templates",
+        alerter=alerter,
+    )

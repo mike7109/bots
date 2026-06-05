@@ -84,7 +84,14 @@ class Engine:
         for dest in destinations:
             transport = self.transports.get(dest)
             if transport is None:
-                skipped.append(dest)
+                # No transport for this destination = MISCONFIG (typo'd `to:`, or
+                # an enabled-but-unimplemented transport like email). This is a
+                # permanent config error, NOT a transient skip — callers retry on
+                # "no sent", so skipping here would silently no-op forever. Record
+                # it as an error so it surfaces in the activity log / error stats.
+                errors.append(dest)
+                log.warning("no transport for destination %r (config error)", dest)
+                self._record(event, "error", dest, f"no transport for destination '{dest}'")
                 continue
             medium = getattr(transport, "medium", "matrix")
             try:

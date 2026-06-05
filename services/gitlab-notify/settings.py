@@ -11,8 +11,6 @@ volume, so an edit in the UI takes effect on the next webhook/cron tick.
 """
 from __future__ import annotations
 
-import datetime as dt
-
 from botkit.config import env
 
 import workcal
@@ -80,15 +78,6 @@ class Settings:
 
     def enabled(self) -> bool:
         return bool(self._global().get("enabled", True))
-
-    def schedule(self) -> dict:
-        g = self._global()
-        return {
-            "anchor_days": frozenset(g["anchor_days"]),
-            "weekly_day": g["weekly_day"],
-            "skip_weekends": g["skip_weekends"],
-            "holidays": frozenset(g["holidays"]),
-        }
 
     # --- per-user prefs --------------------------------------------------
     def _user_key(self, login: str) -> str:
@@ -169,6 +158,30 @@ class Settings:
         cur.update(patch)
         self.store.set_state(_KIND, f"pass:{name}", cur)
         return self.pass_schedule(name)
+
+    # --- operator alerts (who gets DM'd when the bot itself fails) --------
+    def get_alerts(self) -> dict:
+        """Who receives DM alerts about the bot's OWN failures, and whether
+        alerting is on. `engineers` are GitLab logins (resolved to mxids by the
+        Alerter). Defaults: nobody listed, but enabled (so it works the moment
+        the owner adds themselves)."""
+        stored = self.store.get_state(_KIND, "alerts") or {}
+        engineers = stored.get("engineers")
+        return {
+            "engineers": list(engineers) if isinstance(engineers, list) else [],
+            "enabled": bool(stored.get("enabled", True)),
+        }
+
+    def update_alerts(self, patch: dict) -> dict:
+        cur = self.store.get_state(_KIND, "alerts") or {}
+        if "engineers" in patch:
+            eng = patch["engineers"]
+            if isinstance(eng, list):
+                cur["engineers"] = [str(x) for x in eng]
+        if "enabled" in patch:
+            cur["enabled"] = bool(patch["enabled"])
+        self.store.set_state(_KIND, "alerts", cur)
+        return self.get_alerts()
 
     # --- rule overrides (enable/disable + destination) -------------------
     def rule_override(self, event: str) -> dict | None:

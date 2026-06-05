@@ -38,6 +38,14 @@ class Store:
         # check_same_thread=False: the webhook app shares one Store across
         # FastAPI's threadpool workers; a lock serialises access.
         self._db = sqlite3.connect(self.path, check_same_thread=False)
+        # WAL lets a reader and the writer proceed concurrently (host-cron and the
+        # app may touch the same file); busy_timeout is the explicit form of the
+        # default — wait up to 5s for a lock instead of erroring immediately.
+        self._db.execute("PRAGMA journal_mode=WAL")
+        self._db.execute("PRAGMA busy_timeout=5000")
+        # Schema version marker — placeholder for future migrations (set if unset).
+        if self._db.execute("PRAGMA user_version").fetchone()[0] == 0:
+            self._db.execute("PRAGMA user_version=1")
         self._lock = threading.Lock()
         self._db.execute(
             "CREATE TABLE IF NOT EXISTS sent ("
@@ -105,6 +113,20 @@ class Store:
                  dt.datetime.now().isoformat(timespec="seconds")),
             )
             self._db.commit()
+
+    # --- last-run history (per-pass) — reuses the `state` table, kind="run" ---
+    def record_run(self, key: str, iso: str, *, ok: bool = True, detail: str = "") -> None:
+        """Remember the last run of a pass (its scheduled date + outcome), so the
+        scheduler can tell a genuine missed run (recover) from a fresh deploy."""
+        self.set_state("run", key, {
+            "iso": iso, "ok": ok,
+            "ts": dt.datetime.now().isoformat(timespec="seconds"),
+            "detail": detail[:300],
+        })
+
+    def last_run(self, key: str) -> dict | None:
+        """The last recorded run for a pass key, or None if it never ran."""
+        return self.get_state("run", key)
 
     def clear_state(self, kind: str, key: str | int) -> None:
         with self._lock:

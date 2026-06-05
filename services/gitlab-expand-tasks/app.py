@@ -6,7 +6,7 @@ on any Issue. The actual work is done in expand.py.
 import hmac
 import logging
 import os
-import threading
+from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import FastAPI, Header, HTTPException, Request
 
@@ -32,6 +32,12 @@ BOT_ID = int(_required("BOT_USER_ID"))   # token bot's user id -> anti-loop guar
 _required("GITLAB_URL")
 _required("GITLAB_TOKEN")
 MIN_ROLE = int(os.environ.get("MIN_ROLE", "30"))   # 30 = Developer, 40 = Maintainer
+
+# Bounded background worker pool: caps concurrency instead of spawning an
+# unbounded daemon thread per webhook. Excess work queues on the executor.
+# NOTE: in-flight / queued work is lost on process restart (no persistent
+# queue — deferred on purpose).
+_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="expand")
 
 app = FastAPI(title="gitlab-webhook-expand-tasks")
 
@@ -81,7 +87,5 @@ async def webhook(request: Request, x_gitlab_token: str = Header(default="")):
     mode = "run" if confirm else "dry-run"
     log.info("accepted /expand-tasks (%s) for %s#%s by user %s",
              mode, path, iid, author)
-    threading.Thread(
-        target=target, args=(path, project_id, iid), daemon=True,
-    ).start()
+    _pool.submit(target, path, project_id, iid)
     return {"accepted": True, "mode": mode}

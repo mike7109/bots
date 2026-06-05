@@ -24,6 +24,8 @@ import math
 
 from botkit.notify.event import Event
 
+import keys
+
 log = logging.getLogger("gitlab-notify.digest")
 
 WORKFLOW_PREFIX = "workflow::"          # board-column scoped labels
@@ -69,13 +71,15 @@ def _column(labels) -> str | None:
     """The board column an issue sits in = its `workflow::` scoped label.
 
     On Free these aren't mutually exclusive (that's Premium), so an issue can
-    carry several — we take the first. None means it's in the default Open
-    list (no workflow label yet).
+    carry several. REST label order isn't guaranteed, so picking "the first"
+    would make the chosen column — and thus delta "moved" detection —
+    non-deterministic run-to-run. We pick the alphabetically-smallest matching
+    column instead, so the same set of labels always maps to the same column.
+    None means it's in the default Open list (no workflow label yet).
     """
-    for lbl in labels or []:
-        if lbl.startswith(WORKFLOW_PREFIX):
-            return lbl[len(WORKFLOW_PREFIX):]
-    return None
+    cols = [lbl[len(WORKFLOW_PREFIX):] for lbl in (labels or [])
+            if lbl.startswith(WORKFLOW_PREFIX)]
+    return min(cols) if cols else None
 
 
 def _row(issue: dict) -> dict:
@@ -142,24 +146,33 @@ def _by_due(rows: list[dict]) -> list[dict]:
     return sorted(rows, key=lambda r: r["due"] or "")
 
 
-def _ns(skey: str, key) -> str:
-    """Namespace a dedup/snapshot key by source so groups don't collide."""
-    return f"{skey}:{key}" if skey else str(key)
+def _dispatch(engine, store, kind: str, dedup_key: str, event: Event,
+              *, day=None, on_sent=None) -> int:
+    """Dedup-guard, handle the event, and record it on success.
+
+    Returns 1 if the event was delivered (and thus marked sent), else 0. The
+    per-(kind, key, day) `already_sent` guard makes a second run the same day a
+    no-op. `on_sent`, if given, runs after `mark_sent` on a delivered event —
+    digests use it to persist their snapshot for the next delta.
+    """
+    if store.already_sent(kind, dedup_key, day=day):
+        log.info("%s [%s]: already sent today", kind, dedup_key)
+        return 0
+    result = engine.handle(event)
+    if result.get("sent"):
+        store.mark_sent(kind, dedup_key, day=day)
+        if on_sent is not None:
+            on_sent()
+        return 1
+    log.warning("%s [%s] not delivered: %s", kind, dedup_key, result)
+    return 0
 
 
 def _emit(engine, store, kind: str, dedup_key: str, extra: dict, assignees=None,
           *, day=None, room=None) -> int:
-    """Build the digest Event, dispatch it, and mark it sent on success."""
-    if store.already_sent(kind, dedup_key, day=day):
-        log.info("%s [%s]: already sent today", kind, dedup_key)
-        return 0
+    """Build the digest Event and dispatch it (mark sent on success)."""
     event = Event(kind=kind, action="digest", assignees=assignees or [], extra=extra, room=room)
-    result = engine.handle(event)
-    if result.get("sent"):
-        store.mark_sent(kind, dedup_key, day=day)
-        return 1
-    log.warning("%s [%s] not delivered: %s", kind, dedup_key, result)
-    return 0
+    return _dispatch(engine, store, kind, dedup_key, event, day=day)
 
 
 # --- passes --------------------------------------------------------------
@@ -211,12 +224,12 @@ def personal(engine, issues: list[dict], store, *, today: dt.date | None = None,
 
     sent = 0
     for login, items in sorted(by_user.items()):
-        pkey = _ns(skey, login)
-        if store.already_sent("digest_personal", pkey, day=iso):   # one DM per person per day
+        pkey = keys.ns(skey, login)
+        if store.already_sent(keys.DIGEST_PERSONAL, pkey, day=iso):   # one DM per person per day
             continue
         rows = [_row(i) for i in items]
         current = _snapshot(rows, iso, horizon)
-        prev = store.get_state("digest_personal", pkey)
+        prev = store.get_state(keys.DIGEST_PERSONAL, pkey)
 
         if is_anchor:
             extra = {"mode": "full", "date": iso, "total": len(rows),
@@ -224,7 +237,7 @@ def personal(engine, issues: list[dict], store, *, today: dt.date | None = None,
         elif prev is None:
             # First time we see this person off an anchor day: learn their
             # baseline silently, so the next change is a real delta, not "all new".
-            store.set_state("digest_personal", pkey, current)
+            store.set_state(keys.DIGEST_PERSONAL, pkey, current)
             continue
         else:
             changes = _diff(prev, current)
@@ -232,14 +245,10 @@ def personal(engine, issues: list[dict], store, *, today: dt.date | None = None,
                 continue                                    # nothing changed -> silent
             extra = {"mode": "delta", "date": iso, "changes": changes}
 
-        event = Event(kind="digest_personal", action="digest", assignees=[login], extra=extra, room=room)
-        result = engine.handle(event)
-        if result.get("sent"):
-            store.mark_sent("digest_personal", pkey, day=iso)
-            store.set_state("digest_personal", pkey, current)
-            sent += 1
-        else:
-            log.warning("digest_personal [%s] not delivered: %s", login, result)
+        event = Event(kind=keys.DIGEST_PERSONAL, action="digest", assignees=[login], extra=extra, room=room)
+        sent += _dispatch(engine, store, keys.DIGEST_PERSONAL, pkey, event, day=iso,
+                          on_sent=lambda current=current, pkey=pkey:
+                              store.set_state(keys.DIGEST_PERSONAL, pkey, current))
     log.info("personal digest: %d sent (%s)", sent, "anchor" if is_anchor else "delta")
     return sent
 
@@ -285,12 +294,12 @@ def team(engine, issues: list[dict], store, *, today: dt.date | None = None,
     sec_horizon = (today + dt.timedelta(days=TEAM_SOON_DAYS)).isoformat()
     snap_horizon = (today + dt.timedelta(days=PERSONAL_SOON_DAYS)).isoformat()
 
-    gkey = _ns(skey, "group")
+    gkey = keys.ns(skey, "group")
     rows = [_row(i) for i in issues]
     current = _snapshot(rows, iso, snap_horizon)
-    prev = store.get_state("digest_team", gkey)
+    prev = store.get_state(keys.DIGEST_TEAM, gkey)
 
-    if store.already_sent("digest_team", gkey, day=iso):
+    if store.already_sent(keys.DIGEST_TEAM, gkey, day=iso):
         return 0
     if is_anchor:
         sections = _team_sections(rows, iso, sec_horizon)
@@ -298,7 +307,7 @@ def team(engine, issues: list[dict], store, *, today: dt.date | None = None,
             return 0
         extra = {"mode": "full", "date": iso, "open_total": len(rows), "sections": sections}
     elif prev is None:
-        store.set_state("digest_team", gkey, current)   # learn baseline silently
+        store.set_state(keys.DIGEST_TEAM, gkey, current)   # learn baseline silently
         return 0
     else:
         changes = _diff(prev, current)
@@ -306,14 +315,9 @@ def team(engine, issues: list[dict], store, *, today: dt.date | None = None,
             return 0
         extra = {"mode": "delta", "date": iso, "changes": changes}
 
-    event = Event(kind="digest_team", action="digest", extra=extra, room=room)
-    result = engine.handle(event)
-    if result.get("sent"):
-        store.mark_sent("digest_team", gkey, day=iso)
-        store.set_state("digest_team", gkey, current)
-        return 1
-    log.warning("digest_team not delivered: %s", result)
-    return 0
+    event = Event(kind=keys.DIGEST_TEAM, action="digest", extra=extra, room=room)
+    return _dispatch(engine, store, keys.DIGEST_TEAM, gkey, event, day=iso,
+                     on_sent=lambda: store.set_state(keys.DIGEST_TEAM, gkey, current))
 
 
 def _weekly_skip(today: dt.date | None, weekly_day: int, holidays) -> tuple[dt.date, bool]:
@@ -347,7 +351,7 @@ def triage(engine, issues: list[dict], store, *, today: dt.date | None = None,
         log.info("triage digest: nothing to report")
         return 0
 
-    return _emit(engine, store, "triage", _ns(skey, "group"), {"sections": sections},
+    return _emit(engine, store, keys.TRIAGE, keys.ns(skey, "group"), {"sections": sections},
                  day=today.isoformat(), room=room)
 
 
@@ -376,7 +380,7 @@ def stale(engine, gl, group_id: str, store, days: int = STALE_DAYS, *,
         log.info("stale digest: nothing to report")
         return 0
 
-    return _emit(engine, store, "stale", _ns(skey, "group"),
+    return _emit(engine, store, keys.STALE, keys.ns(skey, "group"),
                  {"days": days, "sections": [{"emoji": "🕸", "title": "Без активности", "items": rows}]},
                  day=today.isoformat(), room=room)
 
@@ -424,6 +428,11 @@ def metrics(engine, gl, group_id: str, store, window: int = METRICS_WINDOW,
         "age_med": _median(ages),
         "cycle_p85": _percentile(cycles, 0.85),
     }
-    # Metrics are a daily-stable snapshot; key by ISO week so it posts once a week.
+    # Metrics are a daily-stable snapshot; post once per ISO week. The `sent` PK
+    # is (kind, key, day), so to dedup across the WHOLE week (not per weekday) we
+    # pin `day` to the week_key itself — otherwise a manual `cron.py metrics` (or
+    # repeated admin "Запустить") on a different weekday of the same week would
+    # re-send the weekly report.
     week_key = "%s-W%02d" % today.isocalendar()[:2]
-    return _emit(engine, store, "metrics", _ns(skey, week_key), extra, room=room)
+    return _emit(engine, store, keys.METRICS, keys.ns(skey, week_key), extra,
+                 day=week_key, room=room)

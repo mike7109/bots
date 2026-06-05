@@ -31,6 +31,27 @@ def gql(query: str, variables: dict | None = None) -> dict:
     return data["data"]
 
 
+def _check(data: dict, op: str) -> dict:
+    """Inspect a single-key mutation result and raise on a payload-level error.
+
+    `gql()` only catches TOP-LEVEL transport `errors`. Each GitLab mutation
+    also returns its own payload with an inner `errors` array (permission
+    denied, validation, ...) while the HTTP response is 200 with empty
+    top-level errors. Without this check such partial failures are silently
+    reported as success.
+
+    `data` is the mapping returned by `gql()` for a single mutation, e.g.
+    `{"workItemConvert": {"errors": [...]}}`. Returns the inner payload when
+    there are no errors; raises RuntimeError otherwise. Robust to the payload
+    key being absent or `errors` being None.
+    """
+    payload = (data or {}).get(op) or {}
+    errors = payload.get("errors") or []
+    if errors:
+        raise RuntimeError(f"{op}: {errors}")
+    return payload
+
+
 def member_can(project_id: int, user_id: int, min_level: int) -> bool:
     """True if user has at least `min_level` access (incl. inherited)."""
     r = _session.get(f"{GL}/api/v4/projects/{project_id}/members/all/{user_id}")
@@ -54,9 +75,9 @@ def _collect(path: str, iid: str):
     """
     data = gql(
         """
-        query($p:ID!, $iids:[String!]) {
+        query($p:ID!, $iids:[String!], $lbl:String!) {
           project(fullPath:$p) {
-            label(title:"%s"){ id }
+            label(title:$lbl){ id }
             workItemTypes { nodes { id name } }
             workItems(iids:$iids) {
               nodes {
@@ -72,8 +93,8 @@ def _collect(path: str, iid: str):
             }
           }
         }
-        """ % LABEL,
-        {"p": path, "iids": [iid]},
+        """,
+        {"p": path, "iids": [iid], "lbl": LABEL},
     )["project"]
 
     nodes = data["workItems"]["nodes"]
@@ -152,29 +173,29 @@ def run(path: str, project_id: int, iid: str) -> None:
         wid = t["id"]
         try:
             # 1. detach parent (conversion is blocked while parented)
-            gql(
+            _check(gql(
                 "mutation($i:WorkItemID!){workItemUpdate(input:{id:$i,"
                 "hierarchyWidget:{parentId:null}}){errors}}",
                 {"i": wid},
-            )
+            ), "workItemUpdate")
             # 2. Task -> Issue
-            gql(
+            _check(gql(
                 "mutation($i:WorkItemID!,$t:WorkItemsTypeID!){workItemConvert("
                 "input:{id:$i,workItemTypeId:$t}){errors}}",
                 {"i": wid, "t": issue_type},
-            )
+            ), "workItemConvert")
             # 3. label
-            gql(
+            _check(gql(
                 "mutation($i:WorkItemID!,$l:[LabelID!]){workItemUpdate(input:{id:$i,"
                 "labelsWidget:{addLabelIds:$l}}){errors}}",
                 {"i": wid, "l": [label_id]},
-            )
+            ), "workItemUpdate")
             # 4. relate to the original issue
-            gql(
+            _check(gql(
                 "mutation($i:WorkItemID!,$o:[WorkItemID!]!){workItemAddLinkedItems("
                 "input:{id:$i,workItemsIds:$o,linkType:RELATED}){errors}}",
                 {"i": wid, "o": [parent_wi]},
-            )
+            ), "workItemAddLinkedItems")
             done.append(f"#{t['iid']} {t['title']}")
         except Exception as exc:                   # noqa: BLE001
             log.exception("conversion failed for %s", t["iid"])

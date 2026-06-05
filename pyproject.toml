@@ -14,3 +14,12 @@ botkit = { workspace = true }
 
 [dependency-groups]
 dev = ["ruff>=0.6"]
+
+[tool.pytest.ini_options]
+# The gitlab-notify service modules import each other by bare name
+# (`import digests`, `from settings import ...`), so its dir must be on the
+# path. botkit is installed editable, but listing it here keeps a bare checkout
+# (no editable install) working too.
+pythonpath = ["services/gitlab-notify", "libs/botkit"]
+testpaths = ["tests"]
+addopts = "-q --strict-markers --strict-config"
