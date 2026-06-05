@@ -39,10 +39,13 @@ ADMIN_PASSWORD=              # пока пусто (админка выключ�
 ```bash
 docker compose pull
 docker compose up -d
-docker compose ps
-curl -s http://127.0.0.1:8081/healthz            # {"status":"ok"}
-docker compose logs --tail=40 gitlab-notify       # без traceback; строки "scheduler" нет (off)
+docker compose ps                                 # gitlab-notify → healthy
+curl -s http://172.16.1.10:8081/healthz           # {"status":"ok"}  (это твой BIND_ADDR)
+docker compose logs --tail=40 gitlab-notify        # без traceback; строки "scheduler" нет (off)
 ```
+> Порт слушает на `BIND_ADDR` (172.16.1.10), поэтому проверяй именно его, не
+> `127.0.0.1`. Внутренний healthcheck контейнера от этого не зависит — `ps`
+> покажет `healthy` в любом случае.
 
 ## 4. Проверить вебхуки (как у старого бота)
 Открой/закрой любой issue → сообщение в «🔔 GitLab — infra». Это новый движок,
