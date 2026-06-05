@@ -3,6 +3,8 @@ days, and now is within the grace window — or, past the grace window, only whe
 an established schedule (a prior run on an earlier day) missed today's slot."""
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import scheduler
 from scheduler import GRACE_MINUTES, _hhmm_to_min, due_now, pass_due
 
@@ -96,3 +98,42 @@ def test_pass_due_past_grace_recovers_only_with_prior_run():
     assert pass_due(_cfg(time="09:00"), WED, late, has_prior_run=True) is True
     # fresh deploy / first day -> do NOT catch up (anti-storm)
     assert pass_due(_cfg(time="09:00"), WED, late, has_prior_run=False) is False
+
+
+# --- tick() gates on the active-hours window --------------------------
+# A minimal ctx: tick checks the kill switch / scheduler_on / is_nonworking /
+# is_active_now BEFORE iterating sources. We make sources.enabled() raise so any
+# tick that gets past the active-hours gate is caught — i.e. the gate, not luck,
+# is what stops the pass loop.
+class _Boom(Exception):
+    pass
+
+
+def _ctx(active_now: bool):
+    settings = SimpleNamespace(
+        enabled=lambda: True,
+        get_global=lambda: {"scheduler_on": True},
+        is_nonworking=lambda iso: False,
+        is_active_now=lambda now: active_now,
+        conn_value=lambda field: "",
+    )
+
+    def _enabled():
+        raise _Boom("pass loop reached")             # past the active-hours gate
+
+    sources = SimpleNamespace(enabled=_enabled)
+    return SimpleNamespace(settings=settings, store=None, sources=sources)
+
+
+def test_tick_skips_all_passes_outside_active_window():
+    # Outside the window -> tick returns before touching sources (no _Boom).
+    scheduler.tick(_ctx(active_now=False))           # must NOT raise
+
+
+def test_tick_runs_pass_loop_inside_active_window():
+    # Inside the window -> tick proceeds to the pass loop (our sentinel fires).
+    try:
+        scheduler.tick(_ctx(active_now=True))
+    except _Boom:
+        return
+    raise AssertionError("tick did not reach the pass loop inside the active window")

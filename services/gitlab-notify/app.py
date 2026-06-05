@@ -73,5 +73,9 @@ async def webhook(request: Request, x_gitlab_token: str = Header(default="")):
     src = ctx.sources.match_path(event.project)
     if not src:
         return {"ignored": f"no source for project {event.project}"}
+    # Optional: quiet realtime issue-events outside the active-hours window too
+    # (default OFF — webhooks normally stay realtime regardless of the window).
+    if ctx.settings.get_active_hours().get("webhooks_quiet") and not ctx.settings.is_active_now():
+        return {"ignored": "тихие часы"}
     event.room = src.get("room")
     return ctx.engine.handle(event)

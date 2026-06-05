@@ -216,6 +216,7 @@ def create_admin_router(ctx) -> list[APIRouter]:
                 "holidays_auto": g.get("holidays_auto", False),
             },
             "pass_schedules": settings.all_pass_schedules(),
+            "active_hours": settings.get_active_hours(),
             "has_anchor": list(HAS_ANCHOR),
             # Single-source-of-truth pass metadata (passes.py) for a later UI
             # phase; additive — `passes`/`has_anchor` above stay for today's UI.
@@ -258,6 +259,14 @@ def create_admin_router(ctx) -> list[APIRouter]:
         allowed = {"enabled", "scheduler_on", "anchor_days", "weekly_day",
                    "skip_weekends", "holidays", "holidays_auto"}
         return settings.update_global({k: v for k, v in patch.items() if k in allowed})
+
+    @router.post("/api/active-hours")
+    async def set_active_hours(request: Request):
+        """Update the global active-hours window. Body = partial config
+        ({enabled, from, until, webhooks_quiet}); returns the effective config.
+        Invalid HH:MM values are ignored (kept at the prior/default)."""
+        body = await request.json()
+        return settings.update_active_hours(body if isinstance(body, dict) else {})
 
     @router.post("/api/alerts")
     async def set_alerts(request: Request):

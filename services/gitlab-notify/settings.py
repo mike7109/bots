@@ -11,10 +11,15 @@ volume, so an edit in the UI takes effect on the next webhook/cron tick.
 """
 from __future__ import annotations
 
+import datetime as dt
+import logging
+
 from botkit.config import env
 
 import passes
 import workcal
+
+log = logging.getLogger("gitlab-notify.settings")
 
 # Connection settings the admin can override (DB wins over the env default).
 CONN_FIELDS = {
@@ -26,6 +31,31 @@ CONN_FIELDS = {
 
 _GLOBAL_KEY = "global"
 _KIND = "settings"
+
+# Global active-hours window (time-of-day): outside it scheduled mailings are
+# silent. Complements the per-DAY non-working calendar (is_nonworking). Defaults:
+# enabled, 08:00–20:00 (container TZ), webhooks stay realtime (quiet=off). NB:
+# every current pass fires 09:00–10:00 — inside 08:00–20:00 — so enabling this by
+# default leaves existing scheduled passes unaffected.
+ACTIVE_HOURS_DEFAULTS = {
+    "enabled": True,
+    "from": "08:00",
+    "until": "20:00",
+    "webhooks_quiet": False,
+}
+
+
+def _parse_hhmm(s: str) -> int | None:
+    """Minutes-of-day for an "HH:MM" string, or None if malformed."""
+    if not isinstance(s, str) or len(s) != 5 or s[2] != ":":
+        return None
+    try:
+        h, m = int(s[:2]), int(s[3:])
+    except ValueError:
+        return None
+    if not (0 <= h <= 23 and 0 <= m <= 59):
+        return None
+    return h * 60 + m
 
 # push modes for a person's DMs:
 #   default — let the message decide (digests ping, i.e. m.text)
@@ -110,6 +140,60 @@ class Settings:
         if g.get("holidays_auto") and workcal.is_day_off(date_iso, store=self.store):
             return True
         return False
+
+    # --- active-hours window (time-of-day the bot is allowed to act) ------
+    def get_active_hours(self) -> dict:
+        stored = self.store.get_state(_KIND, "active_hours") or {}
+        out = dict(ACTIVE_HOURS_DEFAULTS)
+        if isinstance(stored.get("enabled"), bool):
+            out["enabled"] = stored["enabled"]
+        if isinstance(stored.get("webhooks_quiet"), bool):
+            out["webhooks_quiet"] = stored["webhooks_quiet"]
+        for k in ("from", "until"):
+            if _parse_hhmm(stored.get(k)) is not None:
+                out[k] = stored[k]
+        return out
+
+    def update_active_hours(self, patch: dict) -> dict:
+        cur = self.store.get_state(_KIND, "active_hours") or {}
+        if "enabled" in patch:
+            cur["enabled"] = bool(patch["enabled"])
+        if "webhooks_quiet" in patch:
+            cur["webhooks_quiet"] = bool(patch["webhooks_quiet"])
+        for k in ("from", "until"):
+            if k in patch and _parse_hhmm(patch[k]) is not None:
+                cur[k] = patch[k]                     # only persist valid HH:MM
+        self.store.set_state(_KIND, "active_hours", cur)
+        return self.get_active_hours()
+
+    def is_active_now(self, now: dt.datetime | None = None) -> bool:
+        """Is the current time inside the active-hours window?
+
+        Disabled -> always active. A normal daytime window (from <= until) is
+        active iff from_min <= now_min <= until_min. A reversed window
+        (from > until) is unsupported in v1: treat as always-active and warn
+        (don't silently brick all mailings). Malformed HH:MM -> fail OPEN (active).
+
+        Reads the RAW stored config (not the sanitized getter) so a corrupt
+        DB row genuinely hits the fail-open path rather than being masked by a
+        silent default."""
+        stored = self.store.get_state(_KIND, "active_hours") or {}
+        enabled = stored.get("enabled", ACTIVE_HOURS_DEFAULTS["enabled"])
+        if not enabled:
+            return True
+        from_min = _parse_hhmm(stored.get("from", ACTIVE_HOURS_DEFAULTS["from"]))
+        until_min = _parse_hhmm(stored.get("until", ACTIVE_HOURS_DEFAULTS["until"]))
+        if from_min is None or until_min is None:     # bad config -> don't brick
+            log.warning("active-hours: bad HH:MM (from=%r until=%r) -> treating as active",
+                        stored.get("from"), stored.get("until"))
+            return True
+        if from_min > until_min:                      # reversed window unsupported in v1
+            log.warning("active-hours: from (%s) > until (%s) unsupported in v1 -> active",
+                        stored.get("from"), stored.get("until"))
+            return True
+        now = now or dt.datetime.now()
+        now_min = now.hour * 60 + now.minute
+        return from_min <= now_min <= until_min
 
     # --- connection settings (admin panel is the single source of truth) -----
     def seed_conn(self) -> None:

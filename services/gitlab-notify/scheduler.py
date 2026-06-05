@@ -88,6 +88,8 @@ def tick(ctx) -> None:
     store = ctx.store
     if s.is_nonworking(iso):                      # holidays / weekends -> silent
         return
+    if not s.is_active_now(now):                  # outside the active-hours window -> silent
+        return
     gitlab_url = s.conn_value("gitlab_url")
     # Each source = its own group + token + room; iterate them all.
     for src in ctx.sources.enabled():

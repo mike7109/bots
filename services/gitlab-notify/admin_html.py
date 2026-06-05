@@ -95,6 +95,17 @@ HTML = r"""<!doctype html>
       <textarea id="holidays" placeholder="2026-01-01&#10;2026-05-09"></textarea>
       <div class="row"><button class="primary" onclick="saveHolidays()">Сохранить даты</button></div>
     </div>
+    <div class="card"><h2>🕗 Часы активности</h2>
+      <p class="hint">Вне этого окна бот молчит — плановые рассылки не уходят. Дополняет нерабочие дни.</p>
+      <div class="row"><span class="mut">Включить ограничение по времени</span>
+        <span class="switch"><input type="checkbox" id="ahOn"><span class="slider"></span></span></div>
+      <div class="row" style="margin-top:10px"><span class="mut">С</span>
+        <input type="time" id="ahFrom"><span class="mut">до</span><input type="time" id="ahUntil"></div>
+      <div class="row" style="margin-top:10px"><span class="mut">Тихие часы и для вебхуков</span>
+        <span class="switch"><input type="checkbox" id="ahWh"><span class="slider"></span></span></div>
+      <p class="hint" style="margin:6px 0 12px">По умолчанию realtime issue-события идут всегда; включите, чтобы и вебхуки молчали вне окна.</p>
+      <div class="row"><button class="primary" onclick="saveActiveHours()">Сохранить</button></div>
+    </div>
   </div>
 
   <!-- Правила -->

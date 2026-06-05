@@ -69,6 +69,7 @@ async function load(){
   renderPasses();
   $('holAuto').checked=s.schedule.holidays_auto;
   $('holidays').value=(s.schedule.holidays||[]).join('\n');
+  renderActiveHours(s.active_hours);
   renderRules();
   renderSources();
   renderConn(s.conn);
@@ -343,6 +344,18 @@ async function savePass(p,btn){
 async function saveHolidays(){
   const holidays=$('holidays').value.split('\n').map(s=>s.trim()).filter(Boolean);
   await api('/global','POST',{holidays});toast('Даты сохранены');
+}
+// 🕗 Часы активности — окно времени суток, вне которого плановые рассылки молчат.
+function renderActiveHours(a){a=a||{};
+  $('ahOn').checked=a.enabled!==false;
+  $('ahFrom').value=a.from||'08:00';
+  $('ahUntil').value=a.until||'20:00';
+  $('ahWh').checked=!!a.webhooks_quiet;
+}
+async function saveActiveHours(){
+  const body={enabled:$('ahOn').checked,from:$('ahFrom').value,
+    until:$('ahUntil').value,webhooks_quiet:$('ahWh').checked};
+  await api('/active-hours','POST',body);toast('Сохранено');load();
 }
 async function passExample(tpl,btn){
   const box=btn.closest('.card').querySelector('.pEx');

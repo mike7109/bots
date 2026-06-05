@@ -1,10 +1,12 @@
 """Settings: DB override beats baseline default, for every layer."""
 from __future__ import annotations
 
+import datetime as dt
+
 import pytest
 
 from botkit.store import Store
-from settings import PASS_DEFAULTS, Settings
+from settings import ACTIVE_HOURS_DEFAULTS, PASS_DEFAULTS, Settings
 
 
 @pytest.fixture
@@ -103,6 +105,77 @@ def test_alerts_validates_types(settings):
     settings.update_alerts({"engineers": "notalist"})   # ignored -> kept
     a = settings.get_alerts()
     assert a["engineers"] == ["a"] and a["enabled"] is True
+
+
+# --- active-hours window ----------------------------------------------
+def _at(h, m=0):
+    return dt.datetime(2026, 6, 5, h, m)
+
+
+def test_active_hours_defaults(settings):
+    assert settings.get_active_hours() == {
+        "enabled": True, "from": "08:00", "until": "20:00", "webhooks_quiet": False}
+    # the module default matches the getter
+    assert settings.get_active_hours() == ACTIVE_HOURS_DEFAULTS
+
+
+def test_active_hours_update_and_roundtrip(settings, store):
+    eff = settings.update_active_hours({"from": "09:00", "webhooks_quiet": True})
+    assert eff["from"] == "09:00" and eff["webhooks_quiet"] is True
+    assert eff["until"] == "20:00"                   # untouched -> default
+    # round-trip via a fresh Settings over the same store (DB-backed)
+    fresh = Settings(store).get_active_hours()
+    assert fresh["from"] == "09:00" and fresh["webhooks_quiet"] is True
+
+
+def test_active_hours_update_merges(settings):
+    settings.update_active_hours({"from": "07:30"})
+    settings.update_active_hours({"enabled": False})   # patch keeps `from`
+    a = settings.get_active_hours()
+    assert a["from"] == "07:30" and a["enabled"] is False
+
+
+def test_active_hours_validates_hhmm(settings):
+    # bad HH:MM ignored (kept at default); bool coerced
+    settings.update_active_hours({"from": "9:00", "until": "25:99", "enabled": 1})
+    a = settings.get_active_hours()
+    assert a["from"] == "08:00" and a["until"] == "20:00"   # garbage rejected
+    assert a["enabled"] is True
+    # a valid value still lands
+    settings.update_active_hours({"from": "06:15"})
+    assert settings.get_active_hours()["from"] == "06:15"
+
+
+def test_is_active_now_inside_window(settings):
+    # default 08:00–20:00
+    assert settings.is_active_now(_at(8, 0)) is True       # lower bound inclusive
+    assert settings.is_active_now(_at(12, 30)) is True
+    assert settings.is_active_now(_at(20, 0)) is True      # upper bound inclusive
+
+
+def test_is_active_now_outside_window(settings):
+    assert settings.is_active_now(_at(7, 59)) is False
+    assert settings.is_active_now(_at(20, 1)) is False
+    assert settings.is_active_now(_at(3, 0)) is False
+
+
+def test_is_active_now_disabled_always_active(settings):
+    settings.update_active_hours({"enabled": False})
+    assert settings.is_active_now(_at(3, 0)) is True       # disabled -> always on
+    assert settings.is_active_now(_at(23, 0)) is True
+
+
+def test_is_active_now_reversed_window_is_active(settings):
+    # from > until is unsupported in v1: don't brick -> treat as always-active
+    settings.update_active_hours({"from": "20:00", "until": "08:00"})
+    assert settings.is_active_now(_at(3, 0)) is True
+    assert settings.is_active_now(_at(12, 0)) is True
+
+
+def test_is_active_now_bad_config_fails_open(settings, store):
+    # malformed HH:MM written directly to the DB (bypassing validation) -> active
+    store.set_state("settings", "active_hours", {"enabled": True, "from": "oops", "until": "20:00"})
+    assert settings.is_active_now(_at(3, 0)) is True
 
 
 # --- connection settings + seed_conn ----------------------------------
