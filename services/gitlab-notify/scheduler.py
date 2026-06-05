@@ -16,6 +16,26 @@ import cron
 
 log = logging.getLogger("gitlab-notify.scheduler")
 TICK_SECONDS = 30
+# A pass fires only within this many minutes after its scheduled time. So a
+# fresh deploy (empty ledger) at, say, 15:00 does NOT "catch up" and blast every
+# morning pass at once — it just waits for the next scheduled slot. A normal
+# restart a few minutes late still fires.
+GRACE_MINUTES = 120
+
+
+def _hhmm_to_min(s: str) -> int:
+    h, m = s.split(":")
+    return int(h) * 60 + int(m)
+
+
+def due_now(cfg: dict, weekday: int, now_min: int) -> bool:
+    """Should this pass fire right now? (enabled, today, within its grace window)"""
+    if not cfg.get("enabled"):
+        return False
+    if weekday not in cfg.get("days", []):
+        return False
+    t = _hhmm_to_min(cfg.get("time", "09:00"))
+    return t <= now_min <= t + GRACE_MINUTES
 
 
 def tick(engine, gl, group_id: str) -> None:
@@ -25,17 +45,13 @@ def tick(engine, gl, group_id: str) -> None:
     now = dt.datetime.now()
     today = now.date()
     iso = today.isoformat()
-    hhmm = now.strftime("%H:%M")
+    now_min = now.hour * 60 + now.minute
     store = s.store
     if s.is_nonworking(iso):                      # holidays / weekends -> silent
         return
     for name in cron.PASSES:
         cfg = s.pass_schedule(name)
-        if not cfg.get("enabled"):
-            continue
-        if today.weekday() not in cfg.get("days", []):
-            continue
-        if hhmm < cfg.get("time", "09:00"):       # not time yet today
+        if not due_now(cfg, today.weekday(), now_min):
             continue
         if store.already_sent("sched", name, day=iso):   # already fired today
             continue

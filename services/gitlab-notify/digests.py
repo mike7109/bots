@@ -162,6 +162,7 @@ def _full_sections(rows: list[dict], today: str, horizon: str) -> list[dict]:
     overdue = [r for r in rows if r["due"] and r["due"] < today]
     due_today = [r for r in rows if r["due"] == today]
     soon = [r for r in rows if r["due"] and today < r["due"] <= horizon]
+    later = [r for r in rows if r["due"] and r["due"] > horizon]
     no_date = [r for r in rows if not r["due"]]
     sections = []
     if overdue:
@@ -170,6 +171,8 @@ def _full_sections(rows: list[dict], today: str, horizon: str) -> list[dict]:
         sections.append({"emoji": "📅", "title": "Сегодня", "items": due_today})
     if soon:
         sections.append({"emoji": "🔜", "title": "На этой неделе", "items": _by_due(soon)})
+    if later:
+        sections.append({"emoji": "🗓", "title": "Позже", "items": _by_due(later)})
     if no_date:
         sections.append({"emoji": "📋", "title": "Без срока", "items": no_date})
     return sections
