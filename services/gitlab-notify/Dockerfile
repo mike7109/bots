@@ -4,6 +4,11 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
+# tzdata so the scheduler fires at the team's local time (set TZ in the env,
+# e.g. TZ=Europe/Moscow). Without it the container is UTC and "09:00" misfires.
+RUN apt-get update && apt-get install -y --no-install-recommends tzdata \
+    && rm -rf /var/lib/apt/lists/*
+
 # Shared library first (changes rarely -> better layer caching).
 COPY libs/botkit /app/libs/botkit
 RUN pip install --no-cache-dir /app/libs/botkit \
