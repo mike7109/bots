@@ -34,3 +34,4 @@ class AppContext:
     config: dict          # parsed config.yaml
     templates_dir: object # pathlib.Path to templates/
     alerter: object       # alerts.Alerter — operator DM on pass failure
+    guard: object = None  # botkit.notify.guard.SendGuard — rate-limit + breaker

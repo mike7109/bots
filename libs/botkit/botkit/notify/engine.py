@@ -28,13 +28,18 @@ log = logging.getLogger("botkit.notify")
 
 
 class Engine:
-    def __init__(self, config: dict, renderer, transports: dict, identity=None, settings=None):
+    def __init__(self, config: dict, renderer, transports: dict, identity=None,
+                 settings=None, guard=None):
         self.rules = config.get("rules", [])
         self.defaults = config.get("defaults", {})
         self.renderer = renderer
         self.transports = transports          # {"matrix": MatrixTransport(...), ...}
         self.identity = identity
         self.settings = settings              # runtime settings (kill switch etc.), optional
+        # SAFETY: rate-limit + circuit breaker (botkit.notify.guard.SendGuard) or
+        # None. When set, every actually-delivered send is recorded here so a
+        # runaway pass trips the breaker and STOPS all further sending centrally.
+        self.guard = guard
 
     def match(self, event: Event) -> dict | None:
         """First rule whose `event:` (and optional `actions:`) matches the event."""
@@ -55,11 +60,39 @@ class Engine:
             except Exception:                       # noqa: BLE001 — logging must never break delivery
                 log.exception("activity log write failed")
 
+    def _guard_record(self, outcome, dest, rendered) -> None:
+        """Record actually-delivered sends with the SendGuard. Best-effort —
+        the guard itself is exception-safe, but never let bookkeeping break the
+        handle loop. A DM outcome can deliver to several mxids; record each so a
+        loop hammering one person trips the PER-TARGET cap. A room outcome (or a
+        DM fallback to the shared room) records under the room id."""
+        try:
+            keys = []
+            if isinstance(outcome, dict):
+                for mxid in outcome.get("dm_to", []) or []:
+                    keys.append(f"dm:{mxid}")
+                room = outcome.get("room") or outcome.get("fallback_room")
+                if room:
+                    keys.append(str(room))
+            if not keys:
+                keys = [str(dest)]
+            for key in keys:
+                self.guard.record(key, rendered)
+        except Exception:                       # noqa: BLE001 — guard must never break delivery
+            log.exception("send guard record failed")
+
     def handle(self, event: Event) -> dict:
         # Global kill switch (admin panel): when off, the bot sends nothing.
         if self.settings is not None and not self.settings.enabled():
             self._record(event, "ignored", "", "бот выключен")
             return {"ignored": "bot disabled", "kind": event.kind, "action": event.action}
+
+        # SAFETY breaker: if the SendGuard has tripped (a runaway pass spammed
+        # past its limits), send NOTHING until an operator resets it. Checked
+        # before any rule matching/dispatch so a flood is stopped centrally.
+        if self.guard is not None and self.guard.blocked():
+            self._record(event, "ignored", "", "предохранитель: отправка остановлена")
+            return {"ignored": "breaker tripped", "kind": event.kind, "action": event.action}
 
         rule = self.match(event)
         if rule is None:
@@ -108,6 +141,14 @@ class Engine:
                 skipped.append(dest)
             else:
                 sent.append(dest)
+                # SAFETY: record the real delivery(s) with the guard so a runaway
+                # pass trips the breaker. Recording AFTER the send means a trip
+                # stops the NEXT send (this loop and all future handles). Derive a
+                # target_key from the outcome so PER-TARGET caps are meaningful:
+                # the room id for room sends, "dm:<mxid>" for each DM delivered;
+                # fall back to the destination name.
+                if self.guard is not None:
+                    self._guard_record(outcome, dest, rendered)
 
         log.info("handled %s/%s -> %s", event.kind, event.action, sent)
         if sent:

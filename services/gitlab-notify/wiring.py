@@ -5,12 +5,15 @@ Builds the notification engine from config.yaml + env so both entrypoints
 """
 from __future__ import annotations
 
+import datetime as dt
+import logging
 from pathlib import Path
 
 from botkit.config import env, load_yaml
 from botkit.identity import Identity
 from botkit.matrix import MatrixClient
 from botkit.notify.engine import Engine
+from botkit.notify.guard import SendGuard
 from botkit.notify.render import Renderer
 from botkit.notify.transports.matrix import MatrixTransport
 from botkit.notify.transports.matrix_direct import MatrixDirectTransport
@@ -22,6 +25,7 @@ from settings import Settings
 from sources import Sources, seed_from_env
 
 HERE = Path(__file__).parent
+log = logging.getLogger("gitlab-notify.wiring")
 
 
 def build_context() -> AppContext:
@@ -57,9 +61,44 @@ def build_context() -> AppContext:
     seed_from_env(sources, group_id=env("GITLAB_GROUP_ID"), token=env("GITLAB_TOKEN"),
                   room=env("MATRIX_ROOM") or config["defaults"].get("room_id"))
 
-    engine = Engine(config, renderer, transports, identity=identity, settings=settings)
     # Operator alerting: DM engineers when a scheduled pass throws (see alerts.py).
     alerter = Alerter(matrix, identity, settings, store)
+
+    # SAFETY: send guard (rate-limit + circuit breaker). Built once at boot from
+    # the current guard config — threshold edits in the admin panel take effect
+    # on the next process restart, but a RESET works live (admin calls
+    # ctx.guard.reset()). The tripped flag is persisted via settings.get/set_breaker
+    # so a crash-loop can't resume spamming. When it trips it both DMs the
+    # engineers (reusing the Alerter, throttled per day) and logs an error row.
+    def _on_trip(reason: str) -> None:
+        today = dt.date.today().isoformat()
+        try:
+            alerter.alert("⛔ Защита от спама сработала — бот ОСТАНОВЛЕН",
+                          reason + " Сбросьте предохранитель в админке.",
+                          key="breaker", day=today)
+        except Exception:                       # noqa: BLE001 — alert is best-effort
+            log.exception("breaker alert failed")
+        try:
+            store.log_event("breaker", "trip", "", "error", reason[:500])
+        except Exception:                       # noqa: BLE001
+            log.exception("breaker log failed")
+
+    gconf = settings.get_guard()
+    guard = SendGuard(
+        enabled=gconf["enabled"],
+        window_s=gconf["window_s"],
+        max_global=gconf["max_global"],
+        target_window_s=gconf["target_window_s"],
+        max_per_target=gconf["max_per_target"],
+        max_duplicate=gconf["max_duplicate"],
+        auto_reset_s=gconf["auto_reset_s"],
+        get_tripped=settings.get_breaker,
+        set_tripped=settings.set_breaker,
+        on_trip=_on_trip,
+    )
+
+    engine = Engine(config, renderer, transports, identity=identity,
+                    settings=settings, guard=guard)
     # Explicit container: app.py (admin) and cron.py reuse one DB/settings/matrix
     # via ctx instead of monkey-patched engine attributes (see context.py).
     return AppContext(
@@ -73,4 +112,5 @@ def build_context() -> AppContext:
         config=config,
         templates_dir=HERE / "templates",
         alerter=alerter,
+        guard=guard,
     )

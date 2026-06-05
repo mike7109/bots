@@ -233,6 +233,8 @@ def create_admin_router(ctx) -> list[APIRouter]:
             "push_modes": list(PUSH_MODES),
             "stats": ctx.store.log_stats(7),
             "alerts": settings.get_alerts(),
+            "breaker": settings.get_breaker(),      # SAFETY: tripped flag + reason
+            "guard": settings.get_guard(),          # rate-limit/breaker thresholds
             "last_runs": last_runs,
             "conn": (lambda c: {
                 "matrix_homeserver": c["matrix_homeserver"],
@@ -268,6 +270,25 @@ def create_admin_router(ctx) -> list[APIRouter]:
             # Silently drop unknown logins — only configured users can be alerted.
             patch["engineers"] = [str(e) for e in body["engineers"] if str(e) in known]
         return settings.update_alerts(patch)
+
+    @router.post("/api/breaker/reset")
+    def breaker_reset():
+        """SAFETY: clear a tripped breaker so sending resumes. Resets the live
+        guard (clears its in-memory window) AND the persistent tripped flag, so
+        it works whether or not the live guard is the one that tripped."""
+        if ctx.guard is not None:
+            ctx.guard.reset()                       # live: clears window + persists False
+        else:
+            settings.set_breaker({"tripped": False})
+        return {"ok": True, "breaker": settings.get_breaker()}
+
+    @router.post("/api/guard")
+    async def set_guard(request: Request):
+        """Update the send-guard thresholds. Threshold changes apply on the next
+        process restart (the live guard is built at boot); a reset works live via
+        /api/breaker/reset. Returns the effective config."""
+        body = await request.json()
+        return settings.update_guard(body if isinstance(body, dict) else {})
 
     @router.post("/api/pass/{name}")
     async def set_pass(name: str, request: Request):

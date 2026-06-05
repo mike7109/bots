@@ -178,6 +178,70 @@ class Settings:
         self.store.set_state(_KIND, "alerts", cur)
         return self.get_alerts()
 
+    # --- send guard (rate-limit + circuit breaker) -----------------------
+    # Thresholds for botkit's SendGuard. Defaults sit comfortably ABOVE any
+    # legitimate burst so normal operation never trips: a full personal digest
+    # DMs every assignee (~11 people) plus the team room in the same minute, so
+    # max_global=50/10min and max_per_target=5/5min clear that with headroom,
+    # while still catching a runaway loop (hundreds of sends, or one message
+    # repeated). auto_reset_s=0 -> manual reset only (an operator must look).
+    GUARD_DEFAULTS = {
+        "enabled": True,
+        "window_s": 600,          # global lookback (10 min)
+        "max_global": 50,         # > a full digest burst (≈11 DMs + team msg)
+        "target_window_s": 300,   # per-recipient lookback (5 min)
+        "max_per_target": 5,      # one person shouldn't get >5 in 5 min normally
+        "max_duplicate": 3,       # the same exact message >3× means a loop
+        "auto_reset_s": 0,        # 0 = manual reset only
+    }
+
+    def get_guard(self) -> dict:
+        stored = self.store.get_state(_KIND, "guard") or {}
+        out = {}
+        for k, default in self.GUARD_DEFAULTS.items():
+            v = stored.get(k, default)
+            out[k] = bool(v) if isinstance(default, bool) else int(v)
+        return out
+
+    def update_guard(self, patch: dict) -> dict:
+        cur = self.store.get_state(_KIND, "guard") or {}
+        for k, default in self.GUARD_DEFAULTS.items():
+            if k not in patch:
+                continue
+            v = patch[k]
+            if isinstance(default, bool):
+                cur[k] = bool(v)
+            else:
+                try:
+                    cur[k] = max(0, int(v))      # counts/seconds are non-negative
+                except (ValueError, TypeError):
+                    pass                          # ignore garbage, keep prior/default
+        self.store.set_state(_KIND, "guard", cur)
+        return self.get_guard()
+
+    # --- breaker trip STATE (persistent — survives restart) --------------
+    # Critical: if a crash-loop keeps restarting the process, the tripped flag
+    # must persist so it doesn't quietly resume spamming on boot.
+    def get_breaker(self) -> dict:
+        stored = self.store.get_state(_KIND, "breaker") or {}
+        return {
+            "tripped": bool(stored.get("tripped", False)),
+            "since": stored.get("since"),
+            "reason": str(stored.get("reason", "")),
+        }
+
+    def set_breaker(self, state: dict) -> dict:
+        tripped = bool(state.get("tripped", False))
+        if tripped:
+            self.store.set_state(_KIND, "breaker", {
+                "tripped": True,
+                "since": state.get("since"),
+                "reason": str(state.get("reason", "")),
+            })
+        else:
+            self.store.set_state(_KIND, "breaker", {"tripped": False})
+        return self.get_breaker()
+
     # --- rule overrides (enable/disable + destination) -------------------
     def rule_override(self, event: str) -> dict | None:
         return self.store.get_state(_KIND, f"rule:{event}")

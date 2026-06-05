@@ -134,3 +134,62 @@ def test_seed_conn_skips_when_already_present(settings, store, monkeypatch):
     monkeypatch.setenv("GITLAB_URL", "https://env.example")
     settings.seed_conn()                            # conn already present -> no-op
     assert settings.conn_value("gitlab_url") == "https://manual.example"
+
+
+# --- send guard config ------------------------------------------------
+def test_guard_defaults(settings):
+    g = settings.get_guard()
+    assert g == {
+        "enabled": True, "window_s": 600, "max_global": 50,
+        "target_window_s": 300, "max_per_target": 5,
+        "max_duplicate": 3, "auto_reset_s": 0,
+    }
+
+
+def test_guard_defaults_clear_a_legit_digest_burst(settings):
+    # A full personal digest DMs every assignee plus the team room in one minute;
+    # the defaults must sit ABOVE that so normal operation never trips.
+    g = settings.get_guard()
+    legit_burst = 11 + 1                              # ~11 assignees + team message
+    assert g["max_global"] > legit_burst
+    assert g["max_per_target"] >= 5
+
+
+def test_guard_update_and_roundtrip(settings, store):
+    eff = settings.update_guard({"enabled": False, "max_global": 100})
+    assert eff["enabled"] is False and eff["max_global"] == 100
+    assert eff["max_per_target"] == 5                # untouched -> default
+    # round-trip via a fresh Settings over the same store
+    assert Settings(store).get_guard()["max_global"] == 100
+
+
+def test_guard_update_validates_types(settings):
+    # ints coerced, bools coerced, garbage ignored (keeps prior/default)
+    settings.update_guard({"max_global": "75", "enabled": 1, "window_s": "oops"})
+    g = settings.get_guard()
+    assert g["max_global"] == 75 and g["enabled"] is True
+    assert g["window_s"] == 600                      # garbage ignored
+
+
+def test_guard_update_clamps_negative_to_zero(settings):
+    settings.update_guard({"max_duplicate": -5})
+    assert settings.get_guard()["max_duplicate"] == 0
+
+
+# --- breaker trip state (persistent) ----------------------------------
+def test_breaker_default(settings):
+    assert settings.get_breaker() == {"tripped": False, "since": None, "reason": ""}
+
+
+def test_breaker_set_and_roundtrip(settings, store):
+    settings.set_breaker({"tripped": True, "since": 1234.5, "reason": "flood"})
+    b = settings.get_breaker()
+    assert b["tripped"] is True and b["since"] == 1234.5 and b["reason"] == "flood"
+    # survives a fresh Settings over the same store (persistent across restart)
+    assert Settings(store).get_breaker()["tripped"] is True
+
+
+def test_breaker_reset_clears_fields(settings):
+    settings.set_breaker({"tripped": True, "since": 1.0, "reason": "x"})
+    settings.set_breaker({"tripped": False})
+    assert settings.get_breaker() == {"tripped": False, "since": None, "reason": ""}
