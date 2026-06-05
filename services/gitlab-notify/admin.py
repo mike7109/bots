@@ -250,6 +250,33 @@ def create_admin_router(engine) -> APIRouter:
         except Exception as e:                       # noqa: BLE001 — show the Jinja error
             return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
+    @router.post("/api/invite-blast")
+    def invite_blast(admin_session: str | None = Cookie(default=None)):
+        """Post one message to the shared room @-tagging everyone who hasn't
+        accepted the bot's DM invite, asking them to connect — and make sure a
+        standing DM invite exists for each."""
+        _guard(admin_session)
+        room = (engine.config.get("defaults") or {}).get("room_id")
+        if not room:
+            return JSONResponse({"ok": False, "error": "не задана общая комната (MATRIX_ROOM)"},
+                                status_code=400)
+        targets = []
+        for login, info in _invite_status(engine).items():
+            if info["invite"] != "accepted" and info["mxid"]:
+                try:
+                    engine.matrix.get_or_create_dm(info["mxid"])   # ensure invite exists
+                except Exception:                                  # noqa: BLE001
+                    log.warning("could not create DM for %s", login)
+                targets.append((login, info["mxid"]))
+        if not targets:
+            return {"ok": True, "pinged": [], "note": "все уже приняли бота"}
+        pills = " ".join(str(engine.identity.matrix_pill(login)) for login, _ in targets)
+        html = (f"🔔 <b>Подключите бота</b><br>{pills} — примите приглашение бота в личку, "
+                "чтобы получать персональные напоминания и дайджесты приватно. "
+                "Откройте DM-инвайт от бота и нажмите «Принять».")
+        engine.matrix.send_html(room, html, mention_user_ids=[m for _, m in targets], notice=False)
+        return {"ok": True, "pinged": [login for login, _ in targets]}
+
     @router.get("/api/template")
     def get_template(name: str, admin_session: str | None = Cookie(default=None)):
         _guard(admin_session)
