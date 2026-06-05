@@ -59,9 +59,11 @@ async function load(){
   $('statusPill').textContent=s.enabled?'РАБОТАЕТ':'ВЫКЛЮЧЕН';
   $('killSwitch').checked=s.enabled;
   $('schedOn').checked=s.scheduler_on!==false;
+  renderBreakerBanner(s.breaker);
   renderStats(s.stats);
   renderErrBanner(s.stats);
   renderAlerts();
+  renderGuard(s.guard);
   renderUserFilters();
   renderUsers();
   renderPasses();
@@ -90,6 +92,49 @@ function renderErrBanner(st){const b=$('errBanner');if(!b)return;
   if(!n){b.innerHTML='';return;}
   const when=et?'сегодня':'за неделю';
   b.innerHTML=`<div class="card" style="border-color:rgba(248,81,73,.4);background:rgba(248,81,73,.08)"><b style="color:var(--bad)">⚠️ ${n} ошибок доставки ${when}</b> <span class="mut">— что-то не отправилось, открой «Логи».</span> <button class="sm" onclick="switchTab('logs')">Открыть «Логи»</button></div>`;
+}
+// ⛔ Предохранитель: красный баннер на ВСЕХ вкладках, пока защита держит бота.
+function renderBreakerBanner(b){const el=$('breakerBanner');if(!el)return;
+  if(!b||!b.tripped){el.innerHTML='';return;}
+  const since=b.since?(' · с '+esc(String(b.since).replace('T',' ').slice(0,16))):'';
+  const reason=b.reason?(' Причина: '+esc(b.reason)+'.'):'';
+  el.innerHTML=`<div class="breaker-banner">
+    <div>⛔ <b>Сработала защита от спама</b> — бот ОСТАНОВЛЕН, отправки не идут.${reason}<span class="mut">${since}</span></div>
+    <button class="primary" onclick="resetBreaker(this)">Сбросить предохранитель</button></div>`;
+}
+async function resetBreaker(btn){
+  btn.disabled=true;const o=btn.textContent;btn.textContent='⏳…';
+  try{const r=await api('/breaker/reset','POST');
+    if(r&&r.ok){toast('Предохранитель сброшен');load();}
+    else{toast('Не удалось сбросить',true);btn.disabled=false;btn.textContent=o;}
+  }catch(e){toast('Ошибка',true);btn.disabled=false;btn.textContent=o;}
+}
+// 🛡 Карточка порогов защиты. Окна показываем в минутах (хранятся в секундах).
+const GUARD_FIELDS=[
+  {k:'max_global',win:'window_s',label:'Глобальный лимит отправок',unit:'за',min:1},
+  {k:'max_per_target',win:'target_window_s',label:'Лимит на одного получателя',unit:'за',min:1},
+  {k:'max_duplicate',label:'Лимит одинаковых сообщений подряд',min:1},
+  {k:'auto_reset_s',label:'Авто-сброс (0 = только вручную)',unit:'мин',min:0,isMin:true},
+];
+function renderGuard(g){g=g||{};
+  $('grdOn').checked=g.enabled!==false;
+  const num=(id,v,min)=>`<input type="number" id="${id}" min="${min}" value="${v==null?'':v}" style="width:80px">`;
+  $('guardFields').innerHTML=GUARD_FIELDS.map(f=>{
+    let right='';
+    if(f.win){const mins=Math.round((g[f.win]||0)/60);
+      right=`<span class="mut">${f.unit}</span>${num('grd_'+f.win,mins,1)}<span class="mut">мин</span>`;}
+    else if(f.isMin){const mins=Math.round((g[f.k]||0)/60);
+      return `<div class="row"><span class="mut" style="width:280px">${f.label}</span>${num('grd_'+f.k,mins,f.min)}<span class="mut">мин</span></div>`;}
+    return `<div class="row"><span class="mut" style="width:280px">${f.label}</span>${num('grd_'+f.k,g[f.k],f.min)}${right}</div>`;
+  }).join('');
+}
+async function saveGuard(){
+  const v=id=>{const e=$(id);return e?Math.max(0,parseInt(e.value,10)||0):undefined;};
+  const body={enabled:$('grdOn').checked,
+    max_global:v('grd_max_global'), window_s:v('grd_window_s')*60,
+    max_per_target:v('grd_max_per_target'), target_window_s:v('grd_target_window_s')*60,
+    max_duplicate:v('grd_max_duplicate'), auto_reset_s:v('grd_auto_reset_s')*60};
+  await api('/guard','POST',body);toast('Сохранено');load();
 }
 function renderAlerts(){
   const a=(S&&S.alerts)||{engineers:[],enabled:true};

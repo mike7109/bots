@@ -68,6 +68,12 @@
   .refbody{padding:0 14px 12px;font-size:13px} .refbody p{margin:8px 0}
   .reflist{margin:4px 0 8px;padding-left:18px} .reflist li{margin:3px 0}
   tr.logerr td{background:rgba(248,81,73,.08)}
+  .breaker-banner{display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+    background:rgba(248,81,73,.16);border:2px solid var(--bad);border-radius:12px;
+    padding:14px 16px;margin-bottom:16px;color:var(--fg);font-size:14px;
+    box-shadow:0 0 0 1px rgba(248,81,73,.25)}
+  .breaker-banner>div:first-child{flex:1}
+  .breaker-banner b{color:var(--bad)}
   .badge{font-size:11px;font-weight:600;padding:1px 8px;border-radius:6px}
   .badge.sent{background:rgba(63,185,80,.15);color:var(--ok)}
   .badge.skipped{background:rgba(139,149,165,.15);color:var(--mut)}

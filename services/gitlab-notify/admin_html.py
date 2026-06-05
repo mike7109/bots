@@ -18,6 +18,9 @@ HTML = r"""<!doctype html>
     <button class="sm" onclick="logout()">Выйти</button>
   </header>
 
+  <!-- Баннер предохранителя — виден на всех вкладках, когда защита сработала -->
+  <div id="breakerBanner"></div>
+
   <div class="tabs" id="tabs"></div>
 
   <!-- Дашборд -->
@@ -184,6 +187,21 @@ HTML = r"""<!doctype html>
       <div class="mut" style="margin:8px 0 4px">Кто получает алерты о сбоях бота:</div>
       <div id="alertEngineers" style="max-height:260px;overflow:auto"></div>
       <div class="row"><button class="primary" onclick="saveAlerts()">Сохранить</button></div>
+    </div>
+    <div class="card"><h2>🛡 Защита от спама</h2>
+      <p class="hint">Предохранитель. Если из-за бага бот начнёт слать слишком много (флуд) — он сам остановит все отправки и позовёт инженеров. Пороги выше нормального объёма рассылок, так что в обычной работе не срабатывает.</p>
+      <details class="ref"><summary>📖 Что это и как сбрасывать</summary>
+        <div class="refbody">
+          <p>Бот считает свои отправки в скользящем окне. Если за окно их станет больше порога (всего, на одного получателя, или одно и то же сообщение подряд) — это похоже на сбой/флуд. Тогда срабатывает предохранитель: отправки <b>останавливаются</b>, наверху появляется красный баннер, инженеры получают алерт.</p>
+          <p>Пороги намеренно <b>выше</b> нормального объёма (полный дайджест ≈ десяток ЛС + сводка) — в штатной работе защита молчит.</p>
+          <p>Сброс — <b>вручную</b> кнопкой «Сбросить предохранитель» в баннере (сначала разберись, почему сработало). Если задан авто-сброс (кулдаун &gt; 0) — бот снимет блокировку сам через указанное время.</p>
+        </div>
+      </details>
+      <div class="row"><span class="mut">Защита включена</span>
+        <span class="switch"><input type="checkbox" id="grdOn"><span class="slider"></span></span></div>
+      <div id="guardFields"></div>
+      <div class="row"><button class="primary" onclick="saveGuard()">Сохранить</button>
+        <span class="mut" style="font-size:12px">— изменения порогов применятся при следующем перезапуске; сброс работает сразу.</span></div>
     </div>
   </div>
 </div></div>
