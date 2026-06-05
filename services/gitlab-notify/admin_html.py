@@ -177,7 +177,9 @@ HTML = r"""<!doctype html>
       <div class="row"><select id="tplSelect" onchange="loadTpl()"></select>
         <button class="sm" onclick="previewTpl()">Предпросмотр</button>
         <button class="primary sm" onclick="saveTpl()">Сохранить</button>
-        <span id="tplHint" class="mut"></span></div>
+        <button class="sm" onclick="resetTpl()" title="Удалить правку из БД, вернуть дефолт из файла">↩ Сбросить</button>
+        <span id="tplOv"></span><span id="tplHint" class="mut"></span></div>
+      <p class="hint" style="margin:4px 0 0">Правки сохраняются как оверрайд в БД (файлы не меняются). «Сбросить» — вернуть дефолт.</p>
       <div class="split">
         <textarea id="tplBody" style="min-height:300px" oninput="schedulePreview()"></textarea>
         <div><div class="mut" style="font-size:11px;margin-bottom:4px">Предпросмотр (примерные данные)</div>
@@ -394,7 +396,12 @@ async function trigger(name,btn){
   }catch(e){if(res){res.style.color='var(--bad)';res.textContent='✗ '+e;}toast('Ошибка',true);}
   btn.disabled=false;btn.textContent=o;
 }
-async function loadTpl(){const name=$('tplSelect').value;if(!name)return;const r=await api('/template?name='+encodeURIComponent(name));$('tplBody').value=r.content;previewTpl();}
+async function loadTpl(){const name=$('tplSelect').value;if(!name)return;const r=await api('/template?name='+encodeURIComponent(name));
+  $('tplBody').value=r.content;
+  $('tplOv').innerHTML=r.overridden?'<span class="badge ignored">изменён (в БД)</span> ':'<span class="mut" style="font-size:12px">дефолт · </span>';
+  previewTpl();}
+async function resetTpl(){if(!confirm('Сбросить шаблон к дефолту из файла? Правка из БД удалится.'))return;
+  await api('/template/reset','POST',{name:$('tplSelect').value});toast('Сброшено к дефолту');loadTpl();}
 let pvTimer=null;
 function schedulePreview(){clearTimeout(pvTimer);pvTimer=setTimeout(previewTpl,500);}
 async function previewTpl(){const r=await api('/template/preview','POST',{content:$('tplBody').value});
@@ -402,7 +409,7 @@ async function previewTpl(){const r=await api('/template/preview','POST',{conten
   else{$('tplErr').textContent=r.error;$('tplHint').textContent='✗ ошибка';$('tplHint').style.color='var(--bad)';}
 }
 async function saveTpl(){const r=await api('/template','POST',{name:$('tplSelect').value,content:$('tplBody').value});
-  if(r.ok)toast('Шаблон сохранён');else toast('Ошибка: '+(r.error||''),true);}
+  if(r.ok){toast('Шаблон сохранён');loadTpl();}else toast('Ошибка: '+(r.error||''),true);}
 async function loadLogs(){const f=$('logFilter').value;const r=await api('/logs?limit=150'+(f?'&status='+f:''));
   $('logs').innerHTML=(r.rows||[]).map(x=>`<tr class="${x.status==='error'?'logerr':''}">
     <td class="mono mut">${esc((x.ts||'').replace('T',' ').slice(5,16))}</td>

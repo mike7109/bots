@@ -43,16 +43,18 @@ def build_engine() -> Engine:
         config["defaults"]["room_id"] = room
 
     identity = Identity(config.get("users", {}), matrix_domain=config.get("matrix_domain"))
-    renderer = Renderer(HERE / "templates", identity=identity)
 
     matrix = MatrixClient(
         env("MATRIX_HOMESERVER", required=True),
         env("MATRIX_TOKEN", required=True),
     )
 
-    # Runtime settings (admin panel) live in the state DB and override config.
+    # Runtime state/settings (admin panel) live in the state DB and override
+    # config + templates. Build the store first so the renderer can read
+    # template overrides from it.
     store = Store()
     settings = Settings(store, defaults=_schedule_defaults())
+    renderer = Renderer(HERE / "templates", identity=identity, store=store)
 
     transports = {
         "room": MatrixTransport(matrix, identity=identity),                     # shared room

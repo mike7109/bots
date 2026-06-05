@@ -283,20 +283,36 @@ def create_admin_router(engine) -> APIRouter:
         path = engine.templates_dir / Path(name).name
         if not path.exists():
             raise HTTPException(status_code=404, detail="not found")
-        return {"name": path.name, "content": path.read_text(encoding="utf-8")}
+        override = settings.store.get_state("template", path.name)   # admin edit (DB), if any
+        return {
+            "name": path.name,
+            "content": override if override is not None else path.read_text(encoding="utf-8"),
+            "default": path.read_text(encoding="utf-8"),
+            "overridden": override is not None,
+        }
 
     @router.post("/api/template")
     async def save_template(request: Request, admin_session: str | None = Cookie(default=None)):
         _guard(admin_session)
         body = await request.json()
         path = engine.templates_dir / Path(body.get("name", "")).name
-        if not path.exists():
+        if not path.exists():                     # only edit known templates
             raise HTTPException(status_code=404, detail="not found")
+        content = body.get("content", "")
         try:
-            path.write_text(body.get("content", ""), encoding="utf-8")
-            return {"ok": True}
-        except OSError as e:                      # e.g. read-only mount in prod
-            return JSONResponse({"ok": False, "error": f"{e} (шаблоны смонтированы read-only?)"},
-                                status_code=500)
+            engine.renderer.env.from_string(content)   # reject broken Jinja before it ships
+        except Exception as e:                          # noqa: BLE001
+            return JSONResponse({"ok": False, "error": f"{type(e).__name__}: {e}"}, status_code=400)
+        # Save as a DB override (templates on disk stay read-only / immutable).
+        settings.store.set_state("template", path.name, content)
+        return {"ok": True}
+
+    @router.post("/api/template/reset")
+    async def reset_template(request: Request, admin_session: str | None = Cookie(default=None)):
+        _guard(admin_session)
+        body = await request.json()
+        name = Path(body.get("name", "")).name
+        settings.store.clear_state("template", name)   # back to the on-disk default
+        return {"ok": True}
 
     return router

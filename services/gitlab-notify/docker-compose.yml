@@ -16,9 +16,9 @@ services:
     ports:
       - "${BIND_ADDR:-127.0.0.1}:8081:8080"
     volumes:
-      - ./config.yaml:/app/svc/config.yaml:ro
-      - ./templates:/app/svc/templates           # rw: admin template editor
-      - gitlab-notify-state:/data                # SQLite: dedup + settings + logs
+      - ./config.yaml:/app/svc/config.yaml:ro    # boot-only, неизменяем
+      - ./templates:/app/svc/templates:ro        # дефолты шаблонов (правки — в БД-оверрайды)
+      - gitlab-notify-state:/data                # SQLite: всё мутабельное (настройки, оверрайды, логи)
     healthcheck:
       test: ["CMD", "python", "-c",
              "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/healthz').status==200 else 1)"]

@@ -14,8 +14,23 @@ from __future__ import annotations
 
 import os
 
-from jinja2 import Environment, FileSystemLoader, select_autoescape
+from jinja2 import BaseLoader, ChoiceLoader, Environment, FileSystemLoader, TemplateNotFound, select_autoescape
 from markupsafe import Markup, escape
+
+
+class _StoreLoader(BaseLoader):
+    """Serves admin-edited template overrides from the DB. The file on disk is
+    the immutable default; an override in `state(kind=template)` shadows it, so
+    editing from the admin never writes to disk (templates stay :ro)."""
+
+    def __init__(self, store):
+        self.store = store
+
+    def get_source(self, environment, template):
+        src = self.store.get_state("template", template) if self.store is not None else None
+        if not src:
+            raise TemplateNotFound(template)        # fall through to the file loader
+        return src, None, lambda: False             # cache disabled -> always fresh
 
 # Action -> bold verb / leading status emoji used by templates.
 _RU_ACTION = {
@@ -93,12 +108,19 @@ def _make_who(mentions):
 
 
 class Renderer:
-    def __init__(self, templates_dir: str | os.PathLike, identity=None):
+    def __init__(self, templates_dir: str | os.PathLike, identity=None, store=None):
+        # DB override (admin edits) wins over the on-disk default. cache_size=0 so
+        # an edit takes effect on the next render without a restart.
+        loaders = []
+        if store is not None:
+            loaders.append(_StoreLoader(store))
+        loaders.append(FileSystemLoader(str(templates_dir)))
         self.env = Environment(
-            loader=FileSystemLoader(str(templates_dir)),
+            loader=ChoiceLoader(loaders),
             autoescape=select_autoescape(enabled_extensions=("j2", "html"), default=True),
             trim_blocks=True,
             lstrip_blocks=True,
+            cache_size=0,
         )
         pill = identity.matrix_pill if identity is not None else (lambda login: Markup(""))
         mentions = _make_mentions(pill)

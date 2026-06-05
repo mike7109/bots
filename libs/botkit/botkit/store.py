@@ -106,6 +106,11 @@ class Store:
             )
             self._db.commit()
 
+    def clear_state(self, kind: str, key: str | int) -> None:
+        with self._lock:
+            self._db.execute("DELETE FROM state WHERE kind=? AND key=?", (kind, str(key)))
+            self._db.commit()
+
     # --- activity log + stats -------------------------------------------
     def log_event(self, kind, action, channel, status: str, detail: str = "") -> None:
         now = dt.datetime.now()
