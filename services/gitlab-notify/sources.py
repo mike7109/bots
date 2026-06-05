@@ -61,6 +61,10 @@ class Sources:
             if fp and (path == fp or path.startswith(fp + "/")):
                 if best is None or len(fp) > len((best.get("full_path") or "").strip("/")):
                     best = s
+        if best is None:
+            en = self.enabled()
+            if len(en) == 1:        # single source -> everything routes to it
+                return en[0]
         return best
 
     def validate(self, group_id: str, token: str) -> dict:

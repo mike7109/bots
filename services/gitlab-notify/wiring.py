@@ -36,12 +36,9 @@ def _schedule_defaults() -> dict:
 def build_engine() -> Engine:
     config = load_yaml(env("CONFIG_PATH", str(HERE / "config.yaml")))
 
-    # Host-specific room id lives in env (MATRIX_ROOM) and overrides config, so
-    # the committed config.yaml stays generic and never diverges per server.
+    # Rooms are per-source now (admin-managed); config.defaults.room_id is only a
+    # last-ditch fallback. MATRIX_ROOM is read once below to seed the first source.
     config.setdefault("defaults", {})
-    room = env("MATRIX_ROOM")
-    if room:
-        config["defaults"]["room_id"] = room
 
     identity = Identity(config.get("users", {}), matrix_domain=config.get("matrix_domain"))
 
@@ -66,8 +63,8 @@ def build_engine() -> Engine:
     # Multi-group sources (admin-managed). Seed the first one from env so an
     # existing single-group deploy keeps working with no config.
     sources = Sources(store, settings)
-    seed_from_env(sources, group_id=env("GITLAB_GROUP_ID"),
-                  token=env("GITLAB_TOKEN"), room=config["defaults"].get("room_id"))
+    seed_from_env(sources, group_id=env("GITLAB_GROUP_ID"), token=env("GITLAB_TOKEN"),
+                  room=env("MATRIX_ROOM") or config["defaults"].get("room_id"))
 
     engine = Engine(config, renderer, transports, identity=identity, settings=settings)
     # Stash shared handles so app.py (admin) and cron.py reuse one DB/settings/matrix.

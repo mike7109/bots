@@ -27,7 +27,7 @@ class MatrixDirectTransport:
                 if mxid:
                     targets.append((login, mxid))
 
-        room = defaults.get("room_id")
+        room = getattr(event, "room", None) or defaults.get("room_id")   # source room first
         if not targets:
             if muted:
                 # Everyone targeted is muted — deliberately silent, not a failure.

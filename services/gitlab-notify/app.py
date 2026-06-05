@@ -58,8 +58,10 @@ async def webhook(request: Request, x_gitlab_token: str = Header(default="")):
     if event is None:
         return {"ignored": f"unhandled event: {payload.get('object_kind')}"}
 
-    # Multi-group routing: send to the matching source's room (else default room).
+    # Multi-group routing: send to the matching source's room. No source for this
+    # project's group -> nowhere configured to send, so ignore it.
     src = engine.sources.match_path(event.project)
-    if src:
-        event.room = src.get("room")
+    if not src:
+        return {"ignored": f"no source for project {event.project}"}
+    event.room = src.get("room")
     return engine.handle(event)
