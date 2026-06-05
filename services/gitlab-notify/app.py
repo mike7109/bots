@@ -27,16 +27,13 @@ engine = build_engine()   # webhook secret is read per-request from settings (DB
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Internal scheduler fires digests per their schedule (admin panel). Disable
-    # with SCHEDULER_ENABLED=false (e.g. if you'd rather drive cron.py from host).
-    task = stop = None
-    if env("SCHEDULER_ENABLED", "true").lower() != "false":
-        stop = asyncio.Event()
-        task = asyncio.create_task(run_scheduler(engine, stop))   # iterates sources itself
+    # Internal scheduler always runs; whether it actually fires is the admin
+    # "Авторассылки" toggle (settings.scheduler_on) + the global kill switch.
+    stop = asyncio.Event()
+    task = asyncio.create_task(run_scheduler(engine, stop))   # iterates sources itself
     yield
-    if task:
-        stop.set()
-        task.cancel()
+    stop.set()
+    task.cancel()
 
 
 app = FastAPI(title="gitlab-notify", lifespan=lifespan)

@@ -33,7 +33,7 @@ volumes:
   gitlab-notify-state:                       # persists dedup ledger + runtime settings
 
 # Reminders & digests: the always-on service schedules them itself (per-pass
-# days+time in the admin panel), so NO host cron is needed. Manage schedule and
-# trigger one-offs from /admin. To opt out and use host cron instead, set
-# SCHEDULER_ENABLED=false and run e.g.
+# days+time in the admin panel), so NO host cron is needed. Manage schedule,
+# the «Авторассылки» on/off toggle, and one-off sends from /admin. To use host
+# cron instead, turn «Авторассылки» off in /admin and run e.g.
 #   0 9 * * 1-5  cd /opt/bots/deploy && docker compose run --rm gitlab-notify python cron.py

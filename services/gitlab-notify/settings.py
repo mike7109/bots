@@ -44,7 +44,7 @@ PASS_DEFAULTS = {
     "digest":  {"enabled": True,  "days": WORKDAYS, "time": "09:00", "anchor_days": [2, 4]},
     "team":    {"enabled": True,  "days": WORKDAYS, "time": "09:30", "anchor_days": [2, 4]},
     "triage":  {"enabled": True,  "days": [0],      "time": "10:00"},
-    "stale":   {"enabled": True,  "days": [0],      "time": "10:00"},
+    "stale":   {"enabled": True,  "days": [0],      "time": "10:00", "days_idle": 14},
     "metrics": {"enabled": False, "days": [0],      "time": "10:00"},
 }
 HAS_ANCHOR = ("digest", "team")
@@ -54,9 +54,10 @@ class Settings:
     def __init__(self, store, *, defaults: dict | None = None):
         self.store = store
         d = defaults or {}
-        # Baseline schedule (seeded from env/config at startup); DB overrides win.
+        # Baseline defaults; DB overrides (admin panel) win.
         self.defaults = {
-            "enabled": True,
+            "enabled": True,            # global kill switch (stops everything)
+            "scheduler_on": True,       # auto-digests on/off (webhooks still fire)
             "anchor_days": list(d.get("anchor_days", [2, 4])),
             "weekly_day": d.get("weekly_day", 0),
             "skip_weekends": d.get("skip_weekends", True),

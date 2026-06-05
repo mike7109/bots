@@ -25,9 +25,8 @@ $EDITOR .env
 ```
 Добавить строки:
 ```
-MATRIX_ROOM=!hnt04WMGva5OGP9nw5vau3zDl5AvMZVg-BVLOSCSQug   # боевая «🔔 GitLab — infra»
+MATRIX_ROOM=!hnt04WMGva5OGP9nw5vau3zDl5AvMZVg-BVLOSCSQug   # сид первой группы → её комната
 BIND_ADDR=172.16.1.10        # чтобы /admin был доступен по LAN
-SCHEDULER_ENABLED=false      # на старте тихо: вебхуки да, авторассылок нет
 TZ=Europe/Moscow
 STATE_DB=/data/state.db
 ADMIN_PASSWORD=              # пока пусто (админка выключена); добавишь на шаге 5

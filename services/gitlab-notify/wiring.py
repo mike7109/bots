@@ -23,16 +23,6 @@ from sources import Sources, seed_from_env
 HERE = Path(__file__).parent
 
 
-def _schedule_defaults() -> dict:
-    """Seed schedule from env; the admin panel overrides these in the DB."""
-    return {
-        "anchor_days": sorted(digests.parse_days(env("DIGEST_ANCHOR_DAYS", "wed,fri"))),
-        "weekly_day": digests.parse_day(env("DIGEST_WEEKLY_DAY", "mon")),
-        "skip_weekends": env("DIGEST_SKIP_WEEKENDS", "true").lower() != "false",
-        "holidays": [d.strip() for d in env("DIGEST_HOLIDAYS", "").split(",") if d.strip()],
-    }
-
-
 def build_engine() -> Engine:
     config = load_yaml(env("CONFIG_PATH", str(HERE / "config.yaml")))
 
@@ -45,8 +35,8 @@ def build_engine() -> Engine:
     # Runtime state/settings (admin panel) live in the state DB and override
     # config + templates + connection secrets (env is the fallback default).
     store = Store()
-    settings = Settings(store, defaults=_schedule_defaults())
-    settings.seed_conn()       # one-time: env -> DB; afterwards admin panel is authoritative
+    settings = Settings(store)   # schedule defaults are built-in; admin panel overrides
+    settings.seed_conn()         # one-time: env -> DB; afterwards admin panel is authoritative
     renderer = Renderer(HERE / "templates", identity=identity, store=store)
 
     # Matrix homeserver/token come from settings (DB; seeded from env once) so

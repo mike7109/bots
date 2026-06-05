@@ -128,6 +128,10 @@ HTML = r"""<!doctype html>
   <!-- Рассылки (расписание + триггеры) -->
   <div class="view" data-v="sched">
     <p class="hint" style="margin:0 0 14px">Каждая рассылка: что делает, когда бот её шлёт (дни + время — планирует сам, host-cron не нужен) и кнопка «запустить сейчас». ⚓ якорные дни — для дайджестов полный обзор вместо «только изменения».</p>
+    <div class="card"><div class="row" style="margin:0"><b style="font-size:15px">⏱ Авторассылки (планировщик)</b>
+      <span class="mut" style="font-size:12px">— бот сам шлёт по расписанию. Выключи → пойдут только вебхуки (issue в комнату), дайджесты молчат.</span>
+      <span class="spacer"></span>
+      <span class="switch"><input type="checkbox" id="schedOn" onchange="api('/global','POST',{scheduler_on:this.checked}).then(()=>toast(this.checked?'Авторассылки включены':'Авторассылки выключены'))"><span class="slider"></span></span></div></div>
     <div id="passCards"></div>
   </div>
 
@@ -247,7 +251,7 @@ const PASS_INFO={
   digest:{icon:'📋',title:'Личный дайджест «Задачи на сегодня»',tpl:'digest_personal',desc:'Каждому в личку его задачи. В якорные дни — полный обзор, в остальные — только изменения со вчера.'},
   team:{icon:'🗓',title:'Сводка команды',tpl:'digest_team',desc:'Обзор задач команды в общую комнату: просрочено / сегодня / ближайшие / в работе.'},
   triage:{icon:'🧹',title:'Триаж',tpl:'triage',desc:'Что требует внимания: без исполнителя или без срока. Обычно раз в неделю.'},
-  stale:{icon:'🕸',title:'Зависшие задачи',tpl:'stale',desc:'Открытые issue без активности ≥ N дней (STALE_DAYS). Обычно раз в неделю.'},
+  stale:{icon:'🕸',title:'Зависшие задачи',tpl:'stale',desc:'Открытые issue без активности ≥ N дней (порог — ниже). Обычно раз в неделю.'},
   metrics:{icon:'📊',title:'Метрики потока',tpl:'metrics',desc:'Еженедельный снимок: закрыто / в работе (WIP) / возраст / cycle time p85.'},
 };
 let UF='all';
@@ -299,6 +303,7 @@ async function load(){
   $('statusPill').className='pill '+(s.enabled?'on':'off');
   $('statusPill').textContent=s.enabled?'РАБОТАЕТ':'ВЫКЛЮЧЕН';
   $('killSwitch').checked=s.enabled;
+  $('schedOn').checked=s.scheduler_on!==false;
   renderStats(s.stats);
   renderUserFilters();
   renderUsers();
@@ -491,6 +496,7 @@ function renderPasses(){
       <div class="row" style="margin:0"><span class="mut">Дни:</span><div class="days pDays">${miniDays(c.days||[],'d')}</div>
         <span class="mut" style="margin-left:8px">Время:</span><input type="time" class="pTime" value="${esc(c.time||'09:00')}">
         ${hasA?`<span class="mut" style="margin-left:8px" title="полный обзор вместо «только изменения»">⚓ Якорь:</span><div class="days pAnchor">${miniDays(c.anchor_days||[],'a')}</div>`:''}
+        ${p==='stale'?`<span class="mut" style="margin-left:8px">Без активности:</span><input type="number" class="pIdle" min="1" value="${c.days_idle||14}" style="width:60px"><span class="mut">дн.</span>`:''}
         <span class="spacer"></span><button class="primary sm" onclick="savePass('${p}',this)">Сохранить</button></div>
       <div class="pResult" style="margin-top:8px;font-size:13px"></div></div>`;
   }).join('');
@@ -501,6 +507,7 @@ async function savePass(p,btn){
     days:[...card.querySelectorAll('.pDays .day.sel')].map(e=>+e.dataset.d),
     time:card.querySelector('.pTime').value};
   const a=card.querySelector('.pAnchor');if(a)body.anchor_days=[...a.querySelectorAll('.day.sel')].map(e=>+e.dataset.a);
+  const idle=card.querySelector('.pIdle');if(idle)body.days_idle=+idle.value;
   await api('/pass/'+p,'POST',body);toast('Расписание «'+p+'» сохранено');
 }
 async function saveHolidays(){

@@ -150,6 +150,7 @@ def create_admin_router(engine) -> APIRouter:
             })
         return {
             "enabled": g["enabled"],
+            "scheduler_on": g.get("scheduler_on", True),
             "schedule": {
                 "anchor_days": sorted(g["anchor_days"]),
                 "anchor_days_label": weekday_names(g["anchor_days"]),
@@ -186,7 +187,8 @@ def create_admin_router(engine) -> APIRouter:
     async def set_global(request: Request, admin_session: str | None = Cookie(default=None)):
         _guard(admin_session)
         patch = await request.json()
-        allowed = {"enabled", "anchor_days", "weekly_day", "skip_weekends", "holidays", "holidays_auto"}
+        allowed = {"enabled", "scheduler_on", "anchor_days", "weekly_day",
+                   "skip_weekends", "holidays", "holidays_auto"}
         return settings.update_global({k: v for k, v in patch.items() if k in allowed})
 
     @router.post("/api/pass/{name}")
@@ -204,6 +206,11 @@ def create_admin_router(engine) -> APIRouter:
             clean["anchor_days"] = sorted({int(d) for d in body["anchor_days"] if 0 <= int(d) <= 6})
         if "time" in body and isinstance(body["time"], str) and len(body["time"]) == 5:
             clean["time"] = body["time"]
+        if "days_idle" in body:                          # stale: N days of inactivity
+            try:
+                clean["days_idle"] = max(1, int(body["days_idle"]))
+            except (ValueError, TypeError):
+                pass
         return settings.update_pass(name, clean)
 
     @router.post("/api/user/{login}")

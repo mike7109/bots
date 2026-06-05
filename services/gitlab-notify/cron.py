@@ -116,8 +116,8 @@ def run_one(engine, gl, group_id: str, store, name: str, *,
     if name == "triage":
         return digests.triage(engine, issues, store, **wk)
     if name == "stale":
-        return digests.stale(engine, gl, group_id, store,
-                             days=int(env("STALE_DAYS", str(digests.STALE_DAYS))), **wk)
+        days = int(engine.settings.pass_schedule("stale").get("days_idle", digests.STALE_DAYS))
+        return digests.stale(engine, gl, group_id, store, days=days, **wk)
     if name == "metrics":
         return digests.metrics(engine, gl, group_id, store, room=room, skey=skey)
     raise ValueError(f"unknown pass: {name}")
@@ -135,7 +135,8 @@ def main(argv: list[str]) -> None:
     wanted = DAILY if cmd == "all" else (cmd,)
     url = settings.conn_value("gitlab_url")
 
-    # Host-cron fallback (when SCHEDULER_ENABLED=false): run the requested passes
+    # Host-cron fallback (if you drive cron.py from host cron instead of the
+    # built-in scheduler): run the requested passes
     # for every configured source. The host cron schedule decides *when*; digests
     # send full on a pass's anchor day, a delta otherwise.
     try:

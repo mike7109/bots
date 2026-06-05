@@ -44,8 +44,8 @@ def due_now(cfg: dict, weekday: int, now_min: int) -> bool:
 
 def tick(engine) -> None:
     s = engine.settings
-    if not s.enabled():                          # global kill switch
-        return
+    if not s.enabled() or not s.get_global().get("scheduler_on", True):
+        return                                   # kill switch / scheduler off (admin)
     now = dt.datetime.now()
     today = now.date()
     iso = today.isoformat()
