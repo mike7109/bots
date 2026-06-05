@@ -1,14 +1,17 @@
 const DAYS=["Пн","Вт","Ср","Чт","Пт","Сб","Вс"];
 const TABS=[["dash","Дашборд"],["src","Группы"],["users","Получатели"],["sched","Рассылки"],["cal","Календарь"],["rules","Правила"],["tpl","Шаблоны"],["logs","Логи"],["conn","Настройки"]];
-const PASS_INFO={
-  due:{icon:'📅',title:'Дедлайн завтра',tpl:'due_soon',desc:'Напоминание в общую комнату об issue, у которых срок наступает завтра.'},
-  overdue:{icon:'⏰',title:'Просрочки',tpl:'overdue',desc:'Личное напоминание исполнителю об его issue с прошедшим сроком.'},
-  digest:{icon:'📋',title:'Личный дайджест «Задачи на сегодня»',tpl:'digest_personal',desc:'Каждому в личку его задачи. В якорные дни — полный обзор, в остальные — только изменения со вчера.'},
-  team:{icon:'🗓',title:'Сводка команды',tpl:'digest_team',desc:'Обзор задач команды в общую комнату: просрочено / сегодня / ближайшие / в работе.'},
-  triage:{icon:'🧹',title:'Триаж',tpl:'triage',desc:'Что требует внимания: без исполнителя или без срока. Обычно раз в неделю.'},
-  stale:{icon:'🕸',title:'Зависшие задачи',tpl:'stale',desc:'Открытые issue без активности ≥ N дней (порог — ниже). Обычно раз в неделю.'},
-  metrics:{icon:'📊',title:'Метрики потока',tpl:'metrics',desc:'Еженедельный снимок: закрыто / в работе (WIP) / возраст / cycle time p85.'},
+// Pass cards are driven by the backend registry (S.registry); the only thing the
+// registry doesn't carry is an icon, so we keep a small map keyed by pass name
+// with a category fallback (group→🗓, personal→📋) and a default •.
+const PASS_ICON={
+  due:'📅', overdue:'⏰',
+  digest_full:'📋', digest_delta:'📋', team_full:'🗓', team_delta:'🗓',
+  triage:'🧹', stale:'🕸', metrics:'📊',
 };
+const CAT_ICON={group:'🗓', personal:'📋'};
+function passIcon(p,meta){return PASS_ICON[p]||CAT_ICON[(meta&&meta.category)]||'•';}
+// {name: registry-entry} lookup, rebuilt from S.registry on every load().
+let REG={};
 let UF='all';
 // Человеческие названия и описания вместо технических кодов событий.
 const KIND={
@@ -54,7 +57,7 @@ function switchTab(name){
 
 async function load(){
   let s; try{s=await api('/state');}catch(e){return;}
-  S=s; showApp();
+  S=s; REG=Object.fromEntries((s.registry||[]).map(p=>[p.name,p])); showApp();
   $('statusPill').className='pill '+(s.enabled?'on':'off');
   $('statusPill').textContent=s.enabled?'РАБОТАЕТ':'ВЫКЛЮЧЕН';
   $('killSwitch').checked=s.enabled;
@@ -307,26 +310,28 @@ function toggleDest(ev,d,on){const r=S.rules.find(x=>x.event===ev);let to=r.to.s
 function miniDays(sel,prefix){return DAYS.map((d,i)=>`<span class="day ${sel.includes(i)?'sel':''}" style="padding:3px 7px;font-size:12px" data-${prefix}="${i}" onclick="this.classList.toggle('sel')">${d}</span>`).join('');}
 function renderPasses(){
   $('passCards').innerHTML=S.passes.map(p=>{
-    const c=S.pass_schedules[p]||{};const hasA=S.has_anchor.includes(p);const info=PASS_INFO[p]||{icon:'•',title:p,desc:''};
-    const sendBtns=hasA
-      ? `<button class="primary sm" onclick="send('${p}','delta',this)">▶ Отправить изменения</button>
-         <button class="primary sm" onclick="send('${p}','full',this)">▶ Отправить всё</button>`
-      : `<button class="primary sm" onclick="send('${p}','',this)">▶ Запустить сейчас</button>`;
+    const c=S.pass_schedules[p]||{};
+    // Meta comes from the backend registry; `tpl` is the pass's event template
+    // (the «✎ шаблон» / «👁 Пример» target) — digest_full & digest_delta share it.
+    const meta=REG[p]||{};
+    const title=meta.title||p, desc=meta.description||'', tpl=meta.event_kind||p;
+    const icon=passIcon(p,meta);
+    // Every pass is single-mode now (Phase 2a split the anchor-dual digests into
+    // separate full/delta passes) → one «Запустить сейчас» button, no mode arg.
     return `<div class="card" data-p="${p}">
-      <div class="row" style="margin:0"><div style="font-size:15px"><b>${info.icon} ${esc(info.title)}</b> <span class="mut mono" style="font-size:11px">${esc(p)}</span></div>
+      <div class="row" style="margin:0"><div style="font-size:15px"><b>${icon} ${esc(title)}</b> <span class="mut mono" style="font-size:11px">${esc(p)}</span></div>
         <span class="spacer"></span>
         <label class="row" style="margin:0;gap:6px"><span class="mut" style="font-size:12px">вкл</span><span class="switch"><input type="checkbox" class="pEn" ${c.enabled?'checked':''}><span class="slider"></span></span></label>
-        <button class="sm" onclick="passExample('${info.tpl}',this)">👁 Пример</button>
-        <button class="sm" onclick="editTpl('${info.tpl}')">✎ шаблон</button>
+        <button class="sm" onclick="passExample('${esc(tpl)}',this)">👁 Пример</button>
+        <button class="sm" onclick="editTpl('${esc(tpl)}')">✎ шаблон</button>
         <button class="sm" onclick="previewPass('${p}',this)">🔍 Предпросмотр</button>
         <span class="sendsep" title="ниже — реальная отправка"></span>
-        ${sendBtns}</div>
-      <p class="hint" style="margin:6px 0 12px">${esc(info.desc)}</p>
+        <button class="primary sm" onclick="send('${p}',this)">▶ Запустить сейчас</button></div>
+      <p class="hint" style="margin:6px 0 12px">${esc(desc)}</p>
       <div class="bubble pEx hide" style="margin-bottom:10px"></div>
       <div class="pPreview" style="margin-bottom:10px"></div>
       <div class="row" style="margin:0"><span class="mut">Дни:</span><div class="days pDays">${miniDays(c.days||[],'d')}</div>
         <span class="mut" style="margin-left:8px">Время:</span><input type="time" class="pTime" value="${esc(c.time||'09:00')}">
-        ${hasA?`<span class="mut" style="margin-left:8px" title="полный обзор вместо «только изменения»">⚓ Якорь:</span><div class="days pAnchor">${miniDays(c.anchor_days||[],'a')}</div>`:''}
         ${p==='stale'?`<span class="mut" style="margin-left:8px">Без активности:</span><input type="number" class="pIdle" min="1" value="${c.days_idle||14}" style="width:60px"><span class="mut">дн.</span>`:''}
         <span class="spacer"></span><button class="primary sm" onclick="savePass('${p}',this)">Сохранить</button></div>
       <div class="pResult" style="margin-top:8px;font-size:13px"></div></div>`;
@@ -337,7 +342,6 @@ async function savePass(p,btn){
   const body={enabled:card.querySelector('.pEn').checked,
     days:[...card.querySelectorAll('.pDays .day.sel')].map(e=>+e.dataset.d),
     time:card.querySelector('.pTime').value};
-  const a=card.querySelector('.pAnchor');if(a)body.anchor_days=[...a.querySelectorAll('.day.sel')].map(e=>+e.dataset.a);
   const idle=card.querySelector('.pIdle');if(idle)body.days_idle=+idle.value;
   await api('/pass/'+p,'POST',body);toast('Расписание «'+p+'» сохранено');
 }
@@ -394,22 +398,23 @@ function renderPer(box,per){
 // 🔍 Предпросмотр — что и кому реально уйдёт сейчас (реальные данные), но НЕ шлёт.
 async function previewPass(name,btn){
   const card=btn.closest('.card');const box=card.querySelector('.pPreview');
-  const hasA=S.has_anchor.includes(name);const mode=hasA?'delta':'';
+  // Single-mode: the pass's mode is fixed server-side, so we never send a `mode`.
   btn.disabled=true;const o=btn.textContent;btn.textContent='⏳…';
   box.innerHTML='<span class="mut">загрузка…</span>';
-  try{const r=await api('/trigger/'+name,'POST',modeBody(mode,true));
+  try{const r=await api('/trigger/'+name,'POST',modeBody('',true));
     if(r.ok)renderPer(box,r.per);
     else box.innerHTML='<span class="err">'+esc(r.error||'ошибка')+'</span>';
   }catch(e){box.innerHTML='<span class="err">'+esc(e)+'</span>';}
   btn.disabled=false;btn.textContent=o;
 }
 // ▶ Отправить — сначала dry (узнать, что уйдёт), потом — реальная отправка.
-async function send(name,mode,btn){
+async function send(name,btn){
   const card=btn.closest('.card');const res=card.querySelector('.pResult');
   btn.disabled=true;const o=btn.textContent;btn.textContent='⏳ запуск…';
   res.style.color='var(--mut)';res.textContent='Проверяю, что уйдёт…';
   try{
-    const dryR=await api('/trigger/'+name,'POST',modeBody(mode,true));
+    // Single-mode: the pass's mode is fixed server-side, so we never send a `mode`.
+    const dryR=await api('/trigger/'+name,'POST',modeBody('',true));
     if(!dryR.ok){res.style.color='var(--bad)';res.textContent='✗ '+(dryR.error||'ошибка');toast('Ошибка',true);btn.disabled=false;btn.textContent=o;return;}
     // Ничего не уйдёт ни по одному источнику — объясняем и не шлём.
     const per=dryR.per||[];
@@ -418,8 +423,9 @@ async function send(name,mode,btn){
       res.style.color='';res.innerHTML=per.map(r=>`<div class="pinfo">${esc(r.source)}: ${esc(REASON_INFO[r.reason]||r.reason)}</div>`).join('');
       toast('Ничего не отправлено — нечего слать');btn.disabled=false;btn.textContent=o;return;
     }
-    // DM-рассылка (личка каждому исполнителю) — подтверждение.
-    if((name==='digest'||name==='overdue')&&dryR.total_recipients>0){
+    // DM-рассылка (личка каждому исполнителю) — подтверждение. Какие пассы
+    // шлют в личку, знает реестр (to включает 'dm'): digest_full/digest_delta/overdue.
+    if(REG[name]&&(REG[name].to||[]).includes('dm')&&dryR.total_recipients>0){
       const all=[];per.forEach(r=>{if(r.reason==='ok')(r.recipients||[]).forEach(x=>all.push(x));});
       const uniq=[...new Set(all)];const shown=uniq.slice(0,12).join(', ')+(uniq.length>12?', …':'');
       if(!confirm(`Разослать ${dryR.total_recipients} личных сообщений (получателям: ${shown}) сейчас? Сообщение уйдёт каждому исполнителю.`)){
@@ -428,7 +434,7 @@ async function send(name,mode,btn){
     }
     // Реальная отправка.
     res.textContent='Отправляю…';
-    const r=await api('/trigger/'+name,'POST',modeBody(mode,false));
+    const r=await api('/trigger/'+name,'POST',modeBody('',false));
     if(!r.ok){res.style.color='var(--bad)';res.textContent='✗ '+(r.error||'ошибка');toast('Ошибка триггера',true);btn.disabled=false;btn.textContent=o;return;}
     const errs=(r.per||[]).filter(x=>x.reason==='error');
     const lines=(r.per||[]).filter(x=>!isNoSend(x.reason)).map(x=>
