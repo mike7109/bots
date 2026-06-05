@@ -213,11 +213,11 @@ HTML = r"""<!doctype html>
   <!-- Настройки -->
   <div class="view" data-v="conn">
     <div class="card"><h2>Подключения</h2>
-      <p class="hint">Адреса и секреты бота — хранятся в БД (поверх env), меняются на лету. Секреты маскируются: пустое поле = не менять. Matrix-токен — один аккаунт бота на все комнаты (per-group задаются только GitLab-токены во вкладке «Группы»).</p>
+      <p class="hint">Адреса и секреты бота — хранятся в БД, меняются на лету. Заданный секрет показан как «🔒 задан …xxxx» — жми «Заменить», чтобы ввести новый. Matrix-токен — один аккаунт бота на все комнаты (per-group задаются только GitLab-токены во вкладке «Группы»).</p>
       <div class="row"><span class="mut" style="width:150px">Matrix homeserver</span><input type="text" id="cHs" style="width:300px" placeholder="https://matrix.…"></div>
-      <div class="row"><span class="mut" style="width:150px">Matrix токен бота</span><input type="password" id="cTok" style="width:300px" placeholder="введите, чтобы изменить">
-        <span id="cTokSt"></span><button class="sm" onclick="checkMatrix(this)">🔌 Проверить</button><span id="cMx" style="font-size:13px"></span></div>
-      <div class="row"><span class="mut" style="width:150px">Секрет вебхука</span><input type="password" id="cWh" style="width:300px" placeholder="введите, чтобы изменить"><span id="cWhSt"></span></div>
+      <div class="row"><span class="mut" style="width:150px">Matrix токен бота</span><span id="cTokWrap"></span>
+        <button class="sm" onclick="checkMatrix(this)">🔌 Проверить</button><span id="cMx" style="font-size:13px"></span></div>
+      <div class="row"><span class="mut" style="width:150px">Секрет вебхука</span><span id="cWhWrap"></span></div>
       <div class="row"><span class="mut" style="width:150px">GitLab URL</span><input type="text" id="cGl" style="width:300px" placeholder="https://git.…"></div>
       <div class="row"><button class="primary" onclick="saveConn()">Сохранить</button></div>
     </div>
@@ -344,23 +344,32 @@ function renderUsers(){
     <td><select onchange="setUser('${login}',{push:this.value})">${S.push_modes.map(m=>`<option value="${m}" ${u.push===m?'selected':''}>${PUSHL[m]||m}</option>`).join('')}</select></td></tr>`).join('')
     ||'<tr><td colspan=5 class="mut">Никого не найдено.</td></tr>';
 }
-function _setBadge(id,has,masked){
-  $(id).innerHTML=has?`<span class="badge sent">✅ задан ${esc(masked)}</span>`:'<span class="badge error">❌ не задан</span>';
+// Секрет: если задан — чип «🔒 задан …xxxx» + «Заменить»; иначе поле ввода.
+function secretField(wrapId,inputId,has,masked,ph,w){
+  $(wrapId).innerHTML=has
+    ? `<span class="badge sent">🔒 задан ${esc(masked)}</span> <button class="sm" type="button" onclick="revealSecret('${wrapId}','${inputId}','${esc(ph)}',${w})">Заменить</button>`
+    : `<input id="${inputId}" type="password" placeholder="${esc(ph)}" style="width:${w}px">`;
+}
+function revealSecret(wrapId,inputId,ph,w){
+  $(wrapId).innerHTML=`<input id="${inputId}" type="password" placeholder="новый ${esc(ph)}" style="width:${w}px"> <button class="sm" type="button" onclick="load()">Отмена</button>`;
+  $(inputId).focus();
 }
 function renderConn(c){c=c||{};
   $('cHs').value=c.matrix_homeserver||'';
   $('cGl').value=c.gitlab_url||'';
-  $('cTok').value='';$('cWh').value='';
-  _setBadge('cTokSt',c.has_matrix_token,c.matrix_token_masked);
-  _setBadge('cWhSt',c.has_webhook_secret,c.webhook_secret_masked);
+  secretField('cTokWrap','cTok',c.has_matrix_token,c.matrix_token_masked,'syt_…',300);
+  secretField('cWhWrap','cWh',c.has_webhook_secret,c.webhook_secret_masked,'секрет вебхука',300);
 }
 async function saveConn(){
-  await api('/conn','POST',{matrix_homeserver:$('cHs').value,matrix_token:$('cTok').value,
-    webhook_secret:$('cWh').value,gitlab_url:$('cGl').value});
+  const body={matrix_homeserver:$('cHs').value,gitlab_url:$('cGl').value};
+  const tok=$('cTok'); if(tok&&tok.value) body.matrix_token=tok.value;   // только если введён новый
+  const wh=$('cWh'); if(wh&&wh.value) body.webhook_secret=wh.value;
+  await api('/conn','POST',body);
   toast('Подключения сохранены');load();
 }
 async function checkMatrix(btn){const el=$('cMx');el.style.color='var(--mut)';el.textContent='проверяю…';
-  const r=await api('/conn/check-matrix','POST',{homeserver:$('cHs').value,token:$('cTok').value});
+  const tok=$('cTok');
+  const r=await api('/conn/check-matrix','POST',{homeserver:$('cHs').value,token:tok?tok.value:''});
   if(r.ok){el.style.color='var(--ok)';el.textContent='✓ '+r.user_id;}else{el.style.color='var(--bad)';el.textContent='✗ '+(r.error||'не работает');}
 }
 async function runHealth(){const sum=$('healthSum'),list=$('healthList');
@@ -392,8 +401,9 @@ function srcCard(s){
     <div class="row" style="margin:10px 0 0"><span class="mut">GitLab группа ID:</span>
       <input class="sGid" value="${esc(s.group_id||'')}" placeholder="напр. 12" style="width:90px">
       <span class="mut">Токен:</span>
-      <input class="sTok" type="password" placeholder="${s.has_token?'введите, чтобы изменить':'glpat-…'}" style="width:160px">
-      ${s.has_token?`<span class="badge sent">✅ ${esc(s.token_masked)}</span>`:'<span class="badge error">нет</span>'}
+      <span class="tokWrap">${s.has_token
+        ? `<span class="badge sent">🔒 задан ${esc(s.token_masked)}</span> <button class="sm" type="button" onclick="grpTokEdit(this)">Заменить</button>`
+        : `<input class="sTok" type="password" placeholder="glpat-…" style="width:160px">`}</span>
       <span class="mut">Комната:</span>
       <input class="sRoom" value="${esc(s.room||'')}" placeholder="!room:server" style="width:220px"></div>
     <div class="row" style="margin:10px 0 0">
@@ -408,10 +418,13 @@ function renderSources(){
   const list=(S.sources||[]).map(srcCard).join('');
   $('srcCards').innerHTML=list+srcCard({});   // + пустая карточка для добавления
 }
+function grpTokEdit(btn){const w=btn.closest('.tokWrap');
+  w.innerHTML='<input class="sTok" type="password" placeholder="новый glpat-…" style="width:160px"> <button class="sm" type="button" onclick="renderSources()">Отмена</button>';
+  w.querySelector('input').focus();}
 function _srcBody(card){
-  const tok=card.querySelector('.sTok').value;
+  const t=card.querySelector('.sTok');               // нет поля = чип «задан» -> токен не трогаем
   return {id:card.dataset.sid||'', name:card.querySelector('.sName').value,
-    group_id:card.querySelector('.sGid').value, token:tok||'…keep',
+    group_id:card.querySelector('.sGid').value, token:(t&&t.value)?t.value:'…keep',
     room:card.querySelector('.sRoom').value, enabled:card.querySelector('.sEn').checked};
 }
 async function validateSrc(btn){
