@@ -1,9 +1,12 @@
 # Standalone run for this one bot (the full stack lives in /deploy).
 #   cp .env.example .env   # fill in real values
-#   IMAGE=ghcr.io/mike7109/gitlab-notify:latest docker compose up -d
+#   docker compose pull && docker compose up -d
 #
 # config.yaml + templates/ are mounted so you can tweak wording/routing and
-# just `docker compose restart` — no rebuild.
+# just `docker compose restart` — no rebuild. The /data volume holds runtime
+# state (dedup, settings, logs); the admin panel + scheduler need it.
+# Set BIND_ADDR in .env to expose the admin panel on the LAN (e.g. 172.16.1.10);
+# defaults to 127.0.0.1 (reach /admin over an SSH tunnel).
 services:
   gitlab-notify:
     image: ${IMAGE:-ghcr.io/mike7109/gitlab-notify:latest}
@@ -11,13 +14,17 @@ services:
     restart: unless-stopped
     env_file: .env
     ports:
-      - "127.0.0.1:8081:8080"
+      - "${BIND_ADDR:-127.0.0.1}:8081:8080"
     volumes:
       - ./config.yaml:/app/svc/config.yaml:ro
-      - ./templates:/app/svc/templates:ro
+      - ./templates:/app/svc/templates           # rw: admin template editor
+      - gitlab-notify-state:/data                # SQLite: dedup + settings + logs
     healthcheck:
       test: ["CMD", "python", "-c",
              "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/healthz').status==200 else 1)"]
       interval: 30s
       timeout: 3s
       retries: 3
+
+volumes:
+  gitlab-notify-state:
