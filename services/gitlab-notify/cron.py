@@ -133,7 +133,7 @@ def main(argv: list[str]) -> None:
     settings = engine.settings
     today = dt.date.today()
     wanted = DAILY if cmd == "all" else (cmd,)
-    url = env("GITLAB_URL", required=True)
+    url = settings.conn_value("gitlab_url")
 
     # Host-cron fallback (when SCHEDULER_ENABLED=false): run the requested passes
     # for every configured source. The host cron schedule decides *when*; digests

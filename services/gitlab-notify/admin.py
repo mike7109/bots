@@ -22,6 +22,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 
 from botkit.config import env
 from botkit.gitlab import GitLabClient
+from botkit.matrix import MatrixClient
 from settings import PUSH_MODES, HAS_ANCHOR, weekday_names
 from admin_html import HTML as _HTML
 import cron
@@ -165,7 +166,13 @@ def create_admin_router(engine) -> APIRouter:
             "passes": list(cron.PASSES),
             "push_modes": list(PUSH_MODES),
             "stats": engine.store.log_stats(7),
-            "gitlab_url": env("GITLAB_URL", ""),
+            "conn": (lambda c: {
+                "matrix_homeserver": c["matrix_homeserver"],
+                "matrix_token_masked": _mask(c["matrix_token"]), "has_matrix_token": bool(c["matrix_token"]),
+                "webhook_secret_masked": _mask(c["webhook_secret"]), "has_webhook_secret": bool(c["webhook_secret"]),
+                "gitlab_url": c["gitlab_url"],
+            })(settings.get_conn()),
+            "gitlab_url": settings.conn_value("gitlab_url"),
             "sources": [
                 {"id": s["id"], "name": s.get("name"), "group_id": s.get("group_id"),
                  "room": s.get("room"), "enabled": s.get("enabled", True),
@@ -215,7 +222,7 @@ def create_admin_router(engine) -> APIRouter:
         _guard(admin_session)
         if name not in cron.PASSES:
             raise HTTPException(status_code=400, detail="unknown pass")
-        url = env("GITLAB_URL", "")
+        url = settings.conn_value("gitlab_url")
         total, per = 0, []
         for src in engine.sources.enabled():
             if not src.get("group_id"):
@@ -370,5 +377,78 @@ def create_admin_router(engine) -> APIRouter:
         _guard(admin_session)
         engine.sources.delete(sid)
         return {"ok": True}
+
+    # --- connection settings (Matrix / webhook / GitLab) ---------------------
+    @router.post("/api/conn")
+    async def set_conn(request: Request, admin_session: str | None = Cookie(default=None)):
+        _guard(admin_session)
+        body = await request.json()
+        patch = {}
+        for f in ("matrix_homeserver", "matrix_token", "webhook_secret", "gitlab_url"):
+            if f in body and not (isinstance(body[f], str) and body[f].startswith("…")):
+                patch[f] = body[f]                  # skip masked (unchanged) secrets
+        settings.update_conn(patch)
+        if "matrix_homeserver" in patch or "matrix_token" in patch:   # apply to live client
+            engine.matrix.reconfigure(settings.conn_value("matrix_homeserver"),
+                                      settings.conn_value("matrix_token"))
+        return {"ok": True}
+
+    @router.post("/api/conn/check-matrix")
+    async def check_matrix(request: Request, admin_session: str | None = Cookie(default=None)):
+        _guard(admin_session)
+        body = await request.json()
+        hs = body.get("homeserver") or settings.conn_value("matrix_homeserver")
+        tok = body.get("token") or ""
+        if not tok or tok.startswith("…"):
+            tok = settings.conn_value("matrix_token")
+        if not hs or not tok:
+            return {"ok": False, "error": "не задан homeserver или токен"}
+        try:
+            return {"ok": True, "user_id": MatrixClient(hs, tok).user_id}
+        except Exception as e:                       # noqa: BLE001
+            return {"ok": False, "error": str(e)}
+
+    @router.get("/api/health")
+    def health(admin_session: str | None = Cookie(default=None)):
+        _guard(admin_session)
+        checks = []
+
+        def add(name, ok, detail=""):
+            checks.append({"name": name, "ok": bool(ok), "detail": detail})
+
+        conn = settings.get_conn()
+        bot_mxid = None
+        try:
+            bot_mxid = engine.matrix.user_id
+            add("Matrix-подключение", True, f"бот {bot_mxid}")
+        except Exception as e:                       # noqa: BLE001
+            add("Matrix-подключение", False, f"токен/хост не работают: {e}")
+        add("Секрет вебхука", bool(conn["webhook_secret"]),
+            "задан" if conn["webhook_secret"] else "не задан — вебхуки отклоняются")
+        add("GitLab URL", bool(conn["gitlab_url"]), conn["gitlab_url"] or "не задан")
+
+        srcs = engine.sources.enabled()
+        add("Группы (источники)", len(srcs) > 0,
+            f"включено: {len(srcs)}" if srcs else "ни одной — добавь во вкладке «Группы»")
+        for s in srcs:
+            label = s.get("name") or s["id"]
+            v = engine.sources.validate(str(s.get("group_id", "")), s.get("token", ""))
+            add(f"«{label}»: доступ к GitLab", v.get("ok"),
+                f"{v.get('group_name')} · issue {v.get('issues')}" if v.get("ok") else v.get("error", "нет доступа"))
+            if s.get("room"):
+                if bot_mxid:
+                    try:
+                        m = engine.matrix.membership(s["room"], bot_mxid)
+                        add(f"«{label}»: бот в комнате", m == "join",
+                            "в комнате" if m == "join" else f"не вступил (membership={m}) — пригласи бота")
+                    except Exception as e:           # noqa: BLE001
+                        add(f"«{label}»: бот в комнате", False, str(e))
+                else:
+                    add(f"«{label}»: бот в комнате", False, "сначала почини Matrix-подключение")
+            else:
+                add(f"«{label}»: комната", False, "не задана")
+
+        return {"ok": all(c["ok"] for c in checks), "checks": checks,
+                "configured": all(c["ok"] for c in checks)}
 
     return router

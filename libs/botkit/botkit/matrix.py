@@ -22,11 +22,19 @@ def _strip_html(html: str) -> str:
 
 class MatrixClient:
     def __init__(self, homeserver: str, token: str, *, timeout: float = 10.0):
-        self.base = homeserver.rstrip("/")
+        self.base = (homeserver or "").rstrip("/")
         self.timeout = timeout
         self._s = requests.Session()
         self._s.headers["Authorization"] = f"Bearer {token}"
         self._user_id: str | None = None
+
+    def reconfigure(self, homeserver: str | None = None, token: str | None = None) -> None:
+        """Swap the homeserver/token at runtime (admin panel) — re-resolves whoami."""
+        if homeserver:
+            self.base = homeserver.rstrip("/")
+        if token:
+            self._s.headers["Authorization"] = f"Bearer {token}"
+        self._user_id = None
 
     def send_html(
         self,

@@ -45,17 +45,17 @@ def build_engine() -> Engine:
 
     identity = Identity(config.get("users", {}), matrix_domain=config.get("matrix_domain"))
 
-    matrix = MatrixClient(
-        env("MATRIX_HOMESERVER", required=True),
-        env("MATRIX_TOKEN", required=True),
-    )
-
     # Runtime state/settings (admin panel) live in the state DB and override
-    # config + templates. Build the store first so the renderer can read
-    # template overrides from it.
+    # config + templates + connection secrets (env is the fallback default).
     store = Store()
     settings = Settings(store, defaults=_schedule_defaults())
+    settings.seed_conn()       # one-time: env -> DB; afterwards admin panel is authoritative
     renderer = Renderer(HERE / "templates", identity=identity, store=store)
+
+    # Matrix homeserver/token come from settings (DB; seeded from env once) so
+    # they're admin-managed; not required at boot — the panel configures them.
+    matrix = MatrixClient(settings.conn_value("matrix_homeserver"),
+                          settings.conn_value("matrix_token"))
 
     transports = {
         "room": MatrixTransport(matrix, identity=identity),                     # shared room
@@ -65,7 +65,7 @@ def build_engine() -> Engine:
     #   transports["email"] = EmailTransport(host=env("SMTP_HOST"), ...)
     # Multi-group sources (admin-managed). Seed the first one from env so an
     # existing single-group deploy keeps working with no config.
-    sources = Sources(store, env("GITLAB_URL", ""))
+    sources = Sources(store, settings)
     seed_from_env(sources, group_id=env("GITLAB_GROUP_ID"),
                   token=env("GITLAB_TOKEN"), room=config["defaults"].get("room_id"))
 

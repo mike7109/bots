@@ -13,7 +13,17 @@ from __future__ import annotations
 
 import datetime as dt
 
+from botkit.config import env
+
 import workcal
+
+# Connection settings the admin can override (DB wins over the env default).
+CONN_FIELDS = {
+    "matrix_homeserver": "MATRIX_HOMESERVER",
+    "matrix_token": "MATRIX_TOKEN",
+    "webhook_secret": "WEBHOOK_SECRET",
+    "gitlab_url": "GITLAB_URL",
+}
 
 _GLOBAL_KEY = "global"
 _KIND = "settings"
@@ -115,6 +125,34 @@ class Settings:
         if g.get("holidays_auto") and workcal.is_day_off(date_iso, store=self.store):
             return True
         return False
+
+    # --- connection settings (admin panel is the single source of truth) -----
+    def seed_conn(self) -> None:
+        """One-time migration: if the DB has no connection settings yet, take
+        them from env. After that the DB (admin panel) is authoritative and env
+        is ignored — no env/admin duality."""
+        if self.store.get_state("settings", "conn") is not None:
+            return
+        self.store.set_state("settings", "conn",
+                             {f: env(ev) for f, ev in CONN_FIELDS.items() if env(ev)})
+
+    def get_conn(self) -> dict:
+        stored = self.store.get_state("settings", "conn") or {}
+        return {f: stored.get(f, "") for f in CONN_FIELDS}
+
+    def conn_value(self, field: str) -> str:
+        return self.get_conn().get(field, "")
+
+    def update_conn(self, patch: dict) -> dict:
+        cur = self.store.get_state("settings", "conn") or {}
+        for f in CONN_FIELDS:
+            if f in patch:
+                if patch[f]:
+                    cur[f] = patch[f]
+                else:
+                    cur.pop(f, None)         # cleared -> fall back to env
+        self.store.set_state("settings", "conn", cur)
+        return self.get_conn()
 
     # --- per-pass schedule (days + time the scheduler fires each pass) ----
     def pass_schedule(self, name: str) -> dict:

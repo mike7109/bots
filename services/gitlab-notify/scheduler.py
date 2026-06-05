@@ -53,7 +53,7 @@ def tick(engine) -> None:
     store = s.store
     if s.is_nonworking(iso):                      # holidays / weekends -> silent
         return
-    gitlab_url = env("GITLAB_URL", "")
+    gitlab_url = s.conn_value("gitlab_url")
     # Each source = its own group + token + room; iterate them all.
     for src in engine.sources.enabled():
         gid = src.get("group_id")

@@ -94,6 +94,7 @@ HTML = r"""<!doctype html>
 
   <!-- Дашборд -->
   <div class="view active" data-v="dash">
+    <div id="cfgBanner"></div>
     <div class="card"><h2>Статистика отправок</h2>
       <p class="hint">Сколько и чего бот отправил. Ошибки подсвечены — если их больше нуля, загляни во вкладку «Логи».</p>
       <div id="stats"></div>
@@ -208,6 +209,24 @@ HTML = r"""<!doctype html>
       <tbody id="logs"></tbody></table>
     </div>
   </div>
+
+  <!-- Настройки -->
+  <div class="view" data-v="conn">
+    <div class="card"><h2>Подключения</h2>
+      <p class="hint">Адреса и секреты бота — хранятся в БД (поверх env), меняются на лету. Секреты маскируются: пустое поле = не менять. Matrix-токен — один аккаунт бота на все комнаты (per-group задаются только GitLab-токены во вкладке «Группы»).</p>
+      <div class="row"><span class="mut" style="width:150px">Matrix homeserver</span><input type="text" id="cHs" style="width:300px" placeholder="https://matrix.…"></div>
+      <div class="row"><span class="mut" style="width:150px">Matrix токен бота</span><input type="password" id="cTok" style="width:300px" placeholder="введите, чтобы изменить">
+        <span id="cTokSt"></span><button class="sm" onclick="checkMatrix(this)">🔌 Проверить</button><span id="cMx" style="font-size:13px"></span></div>
+      <div class="row"><span class="mut" style="width:150px">Секрет вебхука</span><input type="password" id="cWh" style="width:300px" placeholder="введите, чтобы изменить"><span id="cWhSt"></span></div>
+      <div class="row"><span class="mut" style="width:150px">GitLab URL</span><input type="text" id="cGl" style="width:300px" placeholder="https://git.…"></div>
+      <div class="row"><button class="primary" onclick="saveConn()">Сохранить</button></div>
+    </div>
+    <div class="card"><h2>Проверка конфигурации</h2>
+      <p class="hint">Прогоняет всё: Matrix, секрет вебхука, GitLab URL, и каждую группу (доступ по токену + состоит ли бот в её комнате). Видно, что не настроено.</p>
+      <div class="row"><button class="primary" onclick="runHealth()">✅ Проверить всё</button><span id="healthSum" style="font-size:13px"></span></div>
+      <div id="healthList" style="margin-top:10px"></div>
+    </div>
+  </div>
 </div></div>
 
 <div id="login" class="hide"><div class="login card">
@@ -221,7 +240,7 @@ HTML = r"""<!doctype html>
 <div id="toast" class="toast"></div>
 <script>
 const DAYS=["Пн","Вт","Ср","Чт","Пт","Сб","Вс"];
-const TABS=[["dash","Дашборд"],["src","Группы"],["users","Получатели"],["sched","Рассылки"],["cal","Календарь"],["rules","Правила"],["tpl","Шаблоны"],["logs","Логи"]];
+const TABS=[["dash","Дашборд"],["src","Группы"],["users","Получатели"],["sched","Рассылки"],["cal","Календарь"],["rules","Правила"],["tpl","Шаблоны"],["logs","Логи"],["conn","Настройки"]];
 const PASS_INFO={
   due:{icon:'📅',title:'Дедлайн завтра',tpl:'due_soon',desc:'Напоминание в общую комнату об issue, у которых срок наступает завтра.'},
   overdue:{icon:'⏰',title:'Просрочки',tpl:'overdue',desc:'Личное напоминание исполнителю об его issue с прошедшим сроком.'},
@@ -288,6 +307,8 @@ async function load(){
   $('holidays').value=(s.schedule.holidays||[]).join('\n');
   renderRules();
   renderSources();
+  renderConn(s.conn);
+  checkConfig();
   $('tplSelect').innerHTML=s.templates.map(t=>`<option>${esc(t)}</option>`).join('');
   loadTpl();
 }
@@ -322,6 +343,41 @@ function renderUsers(){
     <td><span class="switch"><input type="checkbox" ${u.muted?'':'checked'} onchange="setUser('${login}',{muted:!this.checked})"><span class="slider"></span></span></td>
     <td><select onchange="setUser('${login}',{push:this.value})">${S.push_modes.map(m=>`<option value="${m}" ${u.push===m?'selected':''}>${PUSHL[m]||m}</option>`).join('')}</select></td></tr>`).join('')
     ||'<tr><td colspan=5 class="mut">Никого не найдено.</td></tr>';
+}
+function _setBadge(id,has,masked){
+  $(id).innerHTML=has?`<span class="badge sent">✅ задан ${esc(masked)}</span>`:'<span class="badge error">❌ не задан</span>';
+}
+function renderConn(c){c=c||{};
+  $('cHs').value=c.matrix_homeserver||'';
+  $('cGl').value=c.gitlab_url||'';
+  $('cTok').value='';$('cWh').value='';
+  _setBadge('cTokSt',c.has_matrix_token,c.matrix_token_masked);
+  _setBadge('cWhSt',c.has_webhook_secret,c.webhook_secret_masked);
+}
+async function saveConn(){
+  await api('/conn','POST',{matrix_homeserver:$('cHs').value,matrix_token:$('cTok').value,
+    webhook_secret:$('cWh').value,gitlab_url:$('cGl').value});
+  toast('Подключения сохранены');load();
+}
+async function checkMatrix(btn){const el=$('cMx');el.style.color='var(--mut)';el.textContent='проверяю…';
+  const r=await api('/conn/check-matrix','POST',{homeserver:$('cHs').value,token:$('cTok').value});
+  if(r.ok){el.style.color='var(--ok)';el.textContent='✓ '+r.user_id;}else{el.style.color='var(--bad)';el.textContent='✗ '+(r.error||'не работает');}
+}
+async function runHealth(){const sum=$('healthSum'),list=$('healthList');
+  sum.style.color='var(--mut)';sum.textContent='проверяю…';list.innerHTML='';
+  const r=await api('/health');
+  sum.style.color=r.ok?'var(--ok)':'var(--bad)';
+  const bad=(r.checks||[]).filter(c=>!c.ok).length;
+  sum.textContent=r.ok?'✓ всё настроено':`✗ проблем: ${bad}`;
+  list.innerHTML='<table><tbody>'+(r.checks||[]).map(c=>`<tr><td style="width:24px">${c.ok?'✅':'❌'}</td><td><b>${esc(c.name)}</b></td><td class="mut">${esc(c.detail||'')}</td></tr>`).join('')+'</tbody></table>';
+  return r;
+}
+async function checkConfig(){const b=$('cfgBanner');
+  b.innerHTML='<div class="card" style="border-color:var(--line)"><span class="mut">проверяю конфигурацию…</span></div>';
+  let r;try{r=await api('/health');}catch(e){b.innerHTML='';return;}
+  const bad=(r.checks||[]).filter(c=>!c.ok).length;
+  if(r.ok){b.innerHTML='<div class="card" style="border-color:rgba(63,185,80,.4);background:rgba(63,185,80,.08)"><b style="color:var(--ok)">✅ Бот настроен</b> <span class="mut">— все проверки пройдены</span></div>';}
+  else{b.innerHTML=`<div class="card" style="border-color:rgba(248,81,73,.4);background:rgba(248,81,73,.08)"><b style="color:var(--bad)">⚠️ Бот настроен не полностью</b> <span class="mut">— проблем: ${bad}.</span> <button class="sm" onclick="switchTab('conn');runHealth()">Открыть «Настройки»</button></div>`;}
 }
 function srcCard(s){
   s=s||{};const isNew=!s.id;

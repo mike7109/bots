@@ -11,7 +11,6 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Header, Request
 
 from botkit.config import env
-from botkit.gitlab import GitLabClient
 from botkit.webhook import verify_token
 from admin import create_admin_router
 from normalize import normalize
@@ -23,8 +22,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s",
 )
 
-SECRET = env("WEBHOOK_SECRET", required=True)
-engine = build_engine()
+engine = build_engine()   # webhook secret is read per-request from settings (DB over env)
 
 
 @asynccontextmanager
@@ -32,7 +30,7 @@ async def lifespan(app: FastAPI):
     # Internal scheduler fires digests per their schedule (admin panel). Disable
     # with SCHEDULER_ENABLED=false (e.g. if you'd rather drive cron.py from host).
     task = stop = None
-    if env("SCHEDULER_ENABLED", "true").lower() != "false" and env("GITLAB_URL"):
+    if env("SCHEDULER_ENABLED", "true").lower() != "false":
         stop = asyncio.Event()
         task = asyncio.create_task(run_scheduler(engine, stop))   # iterates sources itself
     yield
@@ -53,7 +51,7 @@ def healthz():
 
 @app.post("/webhook")
 async def webhook(request: Request, x_gitlab_token: str = Header(default="")):
-    verify_token(x_gitlab_token, SECRET)
+    verify_token(x_gitlab_token, engine.settings.conn_value("webhook_secret"))
     payload = await request.json()
 
     event = normalize(payload)

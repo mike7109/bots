@@ -20,9 +20,13 @@ _FIELDS = ("name", "group_id", "token", "room", "enabled", "full_path", "group_n
 
 
 class Sources:
-    def __init__(self, store, gitlab_url: str):
+    def __init__(self, store, settings):
         self.store = store
-        self.gitlab_url = gitlab_url
+        self.settings = settings
+
+    @property
+    def gitlab_url(self) -> str:
+        return self.settings.conn_value("gitlab_url")
 
     def all(self) -> list[dict]:
         items = self.store.list_state(_KIND)
