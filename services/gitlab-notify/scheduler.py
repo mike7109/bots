@@ -109,11 +109,11 @@ def tick(ctx) -> None:
                 continue
             anchor = today.weekday() in cfg.get("anchor_days", [])
             try:
-                n = cron.run_one(ctx.engine, gl, gid, store, name,
-                                 anchor=anchor, room=src.get("room"), skey=src["id"])
+                result = cron.run_one(ctx.engine, gl, gid, store, name,
+                                      anchor=anchor, room=src.get("room"), skey=src["id"])
                 store.mark_sent(keys.SCHED, schedkey, day=iso)
                 store.record_run(schedkey, iso, ok=True)
-                log.info("scheduled %s/%s fired -> %s sent", src["id"], name, n)
+                log.info("scheduled %s/%s fired -> %s sent", src["id"], name, result["sent"])
             except Exception as e:                 # noqa: BLE001 — one pass mustn't kill the loop
                 store.record_run(schedkey, iso, ok=False, detail=str(e))
                 log.exception("scheduled pass %s/%s failed", src["id"], name)

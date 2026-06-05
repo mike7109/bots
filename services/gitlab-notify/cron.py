@@ -55,7 +55,8 @@ def _event(issue: dict, *, kind: str, action: str, room=None) -> Event:
 
 
 def _remind(engine, issues: list[dict], store: Store, *, kind: str, action: str,
-            due_predicate, room=None, skey: str = "", warn_undelivered: bool = False) -> int:
+            due_predicate, room=None, skey: str = "", warn_undelivered: bool = False,
+            commit: bool = True, dry: bool = False):
     """Filter -> per-day dedup -> handle -> mark loop, shared by the reminders.
 
     `due_predicate(due)` selects which issues to remind on (due-tomorrow for the
@@ -63,59 +64,109 @@ def _remind(engine, issues: list[dict], store: Store, *, kind: str, action: str,
     namespaced by source (`keys.ns`), so a second run the same day is a no-op and
     two groups sharing an id don't collide. `warn_undelivered` logs each issue
     the engine failed to deliver (overdue only, matching the original).
+
+    `commit=False` (manual) ignores the per-issue dedup and never marks sent, so
+    a manual run re-sends every matching item statelessly. `dry=True` renders a
+    sample for the first matching issue without dispatching. Returns
+    `(sent, recipients, sample_html)`: `recipients` is the per-issue assignee
+    logins (dm passes) or the room (room passes).
     """
     sent = 0
+    recipients: list[str] = []
+    sample_html = None
+    room_pass = action == "due"                 # due_soon -> room; overdue -> dm
     for issue in issues:
         if not due_predicate(issue.get("due_date")):
             continue
         key = keys.ns(skey, issue.get("id"))   # global issue id — stable across renames
-        if store.already_sent(kind, key):
+        if commit and store.already_sent(kind, key):
             continue
-        result = engine.handle(_event(issue, kind=kind, action=action, room=room))
+        event = _event(issue, kind=kind, action=action, room=room)
+        if sample_html is None:
+            sample_html = digests._render(engine, event)
+        if room_pass:
+            for r in digests._room_recipients(room):
+                if r not in recipients:
+                    recipients.append(r)
+        else:
+            for login in event.assignees:
+                if login not in recipients:
+                    recipients.append(login)
+        if dry:
+            continue
+        result = engine.handle(event)
         if result.get("sent"):
-            store.mark_sent(kind, key)
+            if commit:
+                store.mark_sent(kind, key)
             sent += 1
         elif warn_undelivered:
             log.warning("overdue #%s not delivered: %s", issue.get("iid"), result)
-    return sent
+    return sent, recipients, sample_html
 
 
-def run_due_soon(engine, issues: list[dict], store: Store, *, room=None, skey: str = "") -> int:
+def run_due_soon(engine, issues: list[dict], store: Store, *, room=None, skey: str = "",
+                 commit: bool = True, dry: bool = False) -> dict:
     tomorrow = (dt.date.today() + dt.timedelta(days=1)).isoformat()
-    sent = _remind(engine, issues, store, kind=keys.DUE_SOON, action="due",
-                   due_predicate=lambda due: due == tomorrow, room=room, skey=skey)
+    sent, recipients, html = _remind(
+        engine, issues, store, kind=keys.DUE_SOON, action="due",
+        due_predicate=lambda due: due == tomorrow, room=room, skey=skey,
+        commit=commit, dry=dry)
     log.info("due tomorrow (%s): %d reminder(s) sent", tomorrow, sent)
-    return sent
+    reason = "ok" if (sent or (dry and recipients)) else "empty"
+    return digests._result(sent, reason, recipients, html=html)
 
 
-def run_overdue(engine, issues: list[dict], store: Store, *, room=None, skey: str = "") -> int:
+def run_overdue(engine, issues: list[dict], store: Store, *, room=None, skey: str = "",
+                commit: bool = True, dry: bool = False) -> dict:
     """Open issues whose due_date is already in the past -> DM, once per day."""
     today = dt.date.today().isoformat()
-    sent = _remind(engine, issues, store, kind=keys.OVERDUE, action="overdue",
-                   due_predicate=lambda due: bool(due) and due < today,
-                   room=room, skey=skey, warn_undelivered=True)
+    sent, recipients, html = _remind(
+        engine, issues, store, kind=keys.OVERDUE, action="overdue",
+        due_predicate=lambda due: bool(due) and due < today,
+        room=room, skey=skey, warn_undelivered=True, commit=commit, dry=dry)
     log.info("overdue (before %s): %d reminder(s) sent", today, sent)
-    return sent
+    reason = "ok" if (sent or (dry and recipients)) else "empty"
+    return digests._result(sent, reason, recipients, html=html)
 
 
 def run_one(engine, gl, group_id: str, store, name: str, *,
-            force: bool = False, anchor: bool = False, room=None, skey: str = "") -> int:
+            anchor: bool = False, full: bool | None = None, dry: bool = False,
+            commit: bool = True, room=None, skey: str = "") -> dict:
     """Run a single pass by name. Shared by the scheduler and the admin "send now".
 
     `room`/`skey` route this source's events to its room and namespace dedup so
-    groups don't collide. The caller decides timing: `force` (manual trigger) or
-    `anchor` (scheduled anchor day) -> digests send a full overview; else a delta.
+    groups don't collide.
+
+    Timing/mode:
+      * `anchor` — scheduled anchor day; digests send a full overview (delta
+        otherwise). The scheduler/host-cron pass this and leave `full=None`.
+      * `full` — explicit operator override of the delta/full mode for the two
+        delta digests (`digest`/`team`); None derives it from `anchor`. Ignored
+        by single-mode passes.
+
+    State/preview:
+      * `commit=True` (default — scheduler/host-cron) — keep today's per-pass
+        dedup + baseline writes (byte-identical to before).
+      * `commit=False` (manual) — stateless: bypass the dedup gate and write no
+        `sent`/`state` rows, so a manual run is repeatable and can't perturb the
+        scheduler.
+      * `dry=True` — compute + render a real-data sample, do NOT dispatch.
+
+    Returns the uniform result dict: `{"sent": int, "reason": str,
+    "recipients": list, "html": str|None}`. The scheduler/host-cron read
+    `result["sent"]` for logging/marking, so their behaviour is unchanged.
     """
     issues = gl.group_issues(group_id, state="opened", scope="all")
     wd = dt.date.today().weekday()
-    full = force or anchor
-    ds = dict(anchor_days={wd} if full else set(), holidays=frozenset(), skip_weekends=False,
-              room=room, skey=skey)
-    wk = dict(weekly_day=wd, holidays=frozenset(), room=room, skey=skey)
+    is_full = full if full is not None else anchor
+    ds = dict(anchor_days={wd} if is_full else set(), holidays=frozenset(), skip_weekends=False,
+              room=room, skey=skey, full=full, dry=dry, commit=commit)
+    wk = dict(weekly_day=wd, holidays=frozenset(), room=room, skey=skey,
+              full=full, dry=dry, commit=commit)
     if name == "due":
-        return run_due_soon(engine, issues, store, room=room, skey=skey)
+        return run_due_soon(engine, issues, store, room=room, skey=skey, commit=commit, dry=dry)
     if name == "overdue":
-        return run_overdue(engine, issues, store, room=room, skey=skey)
+        return run_overdue(engine, issues, store, room=room, skey=skey, commit=commit, dry=dry)
     if name == "digest":
         return digests.personal(engine, issues, store, **ds)
     if name == "team":
@@ -126,7 +177,8 @@ def run_one(engine, gl, group_id: str, store, name: str, *,
         days = int(engine.settings.pass_schedule("stale").get("days_idle", digests.STALE_DAYS))
         return digests.stale(engine, gl, group_id, store, days=days, **wk)
     if name == "metrics":
-        return digests.metrics(engine, gl, group_id, store, room=room, skey=skey)
+        return digests.metrics(engine, gl, group_id, store, room=room, skey=skey,
+                               full=full, dry=dry, commit=commit)
     raise ValueError(f"unknown pass: {name}")
 
 

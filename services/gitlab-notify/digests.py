@@ -21,6 +21,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import math
+from dataclasses import asdict
 
 from botkit.notify.event import Event
 
@@ -146,33 +147,65 @@ def _by_due(rows: list[dict]) -> list[dict]:
     return sorted(rows, key=lambda r: r["due"] or "")
 
 
-def _dispatch(engine, store, kind: str, dedup_key: str, event: Event,
-              *, day=None, on_sent=None) -> int:
-    """Dedup-guard, handle the event, and record it on success.
-
-    Returns 1 if the event was delivered (and thus marked sent), else 0. The
-    per-(kind, key, day) `already_sent` guard makes a second run the same day a
-    no-op. `on_sent`, if given, runs after `mark_sent` on a delivered event —
-    digests use it to persist their snapshot for the next delta.
-    """
-    if store.already_sent(kind, dedup_key, day=day):
-        log.info("%s [%s]: already sent today", kind, dedup_key)
-        return 0
-    result = engine.handle(event)
-    if result.get("sent"):
-        store.mark_sent(kind, dedup_key, day=day)
-        if on_sent is not None:
-            on_sent()
-        return 1
-    log.warning("%s [%s] not delivered: %s", kind, dedup_key, result)
-    return 0
-
-
 def _emit(engine, store, kind: str, dedup_key: str, extra: dict, assignees=None,
-          *, day=None, room=None) -> int:
-    """Build the digest Event and dispatch it (mark sent on success)."""
+          *, day=None, room=None, commit: bool = True, dry: bool = False,
+          recipients=None) -> dict:
+    """Build the digest Event and dispatch it (mark sent on success).
+
+    Returns a uniform result dict (see `_result`). `commit=False` bypasses the
+    per-pass dedup gate and skips `mark_sent` (stateless manual run). `dry=True`
+    renders a real-data sample without dispatching.
+    """
     event = Event(kind=kind, action="digest", assignees=assignees or [], extra=extra, room=room)
-    return _dispatch(engine, store, kind, dedup_key, event, day=day)
+    if dry:
+        return _result(0, "ok", recipients or _room_recipients(room),
+                       html=_render(engine, event))
+    if commit and store.already_sent(kind, dedup_key, day=day):
+        log.info("%s [%s]: already sent today", kind, dedup_key)
+        return _result(0, "ok", recipients or _room_recipients(room))
+    result = engine.handle(event)
+    sent = 1 if result.get("sent") else 0
+    if sent and commit:
+        store.mark_sent(kind, dedup_key, day=day)
+    if not sent:
+        log.warning("%s [%s] not delivered: %s", kind, dedup_key, result)
+    return _result(sent, "ok", recipients or _room_recipients(room),
+                   html=_render(engine, event))
+
+
+# --- manual "Run now" plumbing: uniform result + real-data preview -------
+def _result(sent: int, reason: str, recipients=None, *, html=None) -> dict:
+    """The uniform shape every pass returns: {sent, reason, recipients, html}.
+
+    `reason` ∈ {ok, no_changes, no_baseline, empty, error}. `recipients` is
+    ["room:<id>"] for room passes or the list of assignee logins for dm passes.
+    `html` is a rendered real-data sample (set for dry AND real sends).
+    """
+    return {"sent": sent, "reason": reason, "recipients": list(recipients or []), "html": html}
+
+
+def _room_recipients(room) -> list[str]:
+    """Recipient label for a room pass: ["room:<id>"] (or [] if no room)."""
+    return [f"room:{room}"] if room else ["room:default"]
+
+
+def _render(engine, event: Event) -> str | None:
+    """Render the real-data Matrix sample for an event via the matched rule's
+    template (the same template a real send would use). Best-effort: returns
+    None if no renderer / no matching rule / a render error."""
+    renderer = getattr(engine, "renderer", None)
+    match = getattr(engine, "match", None)
+    if renderer is None or match is None:
+        return None
+    rule = match(event)
+    template = (rule or {}).get("template") if rule else None
+    if not template:
+        return None
+    try:
+        return renderer.render(template, "matrix", asdict(event))
+    except Exception as e:                              # noqa: BLE001 — preview must never raise
+        log.warning("dry render of %s failed: %s", template, e)
+        return None
 
 
 # --- passes --------------------------------------------------------------
@@ -199,20 +232,30 @@ def _full_sections(rows: list[dict], today: str, horizon: str) -> list[dict]:
 
 def personal(engine, issues: list[dict], store, *, today: dt.date | None = None,
              anchor_days=ANCHOR_DAYS, holidays=frozenset(), skip_weekends: bool = True,
-             room=None, skey: str = "") -> int:
+             room=None, skey: str = "", full: bool | None = None,
+             dry: bool = False, commit: bool = True) -> dict:
     """Per-assignee DM, delta-driven.
 
     Only writes when a person's issues actually changed (new / moved column /
     due changed / crossed into overdue-or-today / removed) — no daily repeat of
-    an unchanged list. On `anchor_days` it sends a full overview regardless.
-    Weekends (unless skip_weekends=False) and `holidays` (ISO dates) are silent.
+    an unchanged list. On `anchor_days` (or `full=True`) it sends a full
+    overview regardless. Weekends (unless skip_weekends=False) and `holidays`
+    (ISO dates) are silent.
+
+    `full`: None -> derive from the anchor day (scheduler behaviour). True/False
+    -> explicit operator choice (full overview vs delta). `commit=False`
+    (manual) bypasses the per-person dedup gate and writes no `sent`/`state`
+    rows — repeatable + stateless. `dry=True` renders a per-recipient sample
+    without dispatching. Returns the uniform `_result` dict, aggregated across
+    recipients ("ok" if any would send, else the dominant reason).
     """
     today = today or _today()
     iso = today.isoformat()
-    if (skip_weekends and today.weekday() >= 5) or iso in holidays:
+    if commit and ((skip_weekends and today.weekday() >= 5) or iso in holidays):
         log.info("personal digest: quiet day (%s) — silent", iso)
-        return 0
+        return _result(0, "empty", [])
     is_anchor = today.weekday() in anchor_days
+    is_full = full if full is not None else is_anchor
     horizon = (today + dt.timedelta(days=PERSONAL_SOON_DAYS)).isoformat()
 
     by_user: dict[str, list[dict]] = {}
@@ -223,34 +266,64 @@ def personal(engine, issues: list[dict], store, *, today: dt.date | None = None,
                 by_user.setdefault(login, []).append(issue)
 
     sent = 0
+    recipients: list[str] = []          # logins this run sent to (or would send to)
+    reasons: list[str] = []             # per-person would-be reason (for aggregation)
+    sample_html = None                  # first recipient's rendered message
     for login, items in sorted(by_user.items()):
         pkey = keys.ns(skey, login)
-        if store.already_sent(keys.DIGEST_PERSONAL, pkey, day=iso):   # one DM per person per day
+        if commit and store.already_sent(keys.DIGEST_PERSONAL, pkey, day=iso):  # one DM per person per day
             continue
         rows = [_row(i) for i in items]
         current = _snapshot(rows, iso, horizon)
         prev = store.get_state(keys.DIGEST_PERSONAL, pkey)
 
-        if is_anchor:
+        if is_full:
             extra = {"mode": "full", "date": iso, "total": len(rows),
                      "sections": _full_sections(rows, iso, horizon)}
         elif prev is None:
-            # First time we see this person off an anchor day: learn their
-            # baseline silently, so the next change is a real delta, not "all new".
-            store.set_state(keys.DIGEST_PERSONAL, pkey, current)
+            # Delta with no baseline. Scheduler (commit): learn it silently so
+            # the next change is a real delta, not "all new". Manual (no commit):
+            # there's nothing to diff against — report it, don't seed.
+            if commit:
+                store.set_state(keys.DIGEST_PERSONAL, pkey, current)
+            reasons.append("no_baseline")
             continue
         else:
             changes = _diff(prev, current)
             if not any(changes.values()):
+                reasons.append("no_changes")
                 continue                                    # nothing changed -> silent
             extra = {"mode": "delta", "date": iso, "changes": changes}
 
         event = Event(kind=keys.DIGEST_PERSONAL, action="digest", assignees=[login], extra=extra, room=room)
-        sent += _dispatch(engine, store, keys.DIGEST_PERSONAL, pkey, event, day=iso,
-                          on_sent=lambda current=current, pkey=pkey:
-                              store.set_state(keys.DIGEST_PERSONAL, pkey, current))
-    log.info("personal digest: %d sent (%s)", sent, "anchor" if is_anchor else "delta")
-    return sent
+        if sample_html is None:
+            sample_html = _render(engine, event)
+        reasons.append("ok")
+        recipients.append(login)
+        if dry:
+            continue
+        result = engine.handle(event)
+        if result.get("sent"):
+            sent += 1
+            if commit:
+                store.mark_sent(keys.DIGEST_PERSONAL, pkey, day=iso)
+                store.set_state(keys.DIGEST_PERSONAL, pkey, current)
+        else:
+            log.warning("%s [%s] not delivered: %s", keys.DIGEST_PERSONAL, pkey, result)
+    log.info("personal digest: %d sent (%s)", sent, "full" if is_full else "delta")
+    reason = _aggregate_reason(reasons)
+    # dry/real: recipients = logins it would DM (only the "ok" ones).
+    return _result(sent, reason, recipients, html=sample_html)
+
+
+def _aggregate_reason(reasons: list[str]) -> str:
+    """Fold per-recipient reasons into one: "ok" if any would send, else the
+    most common of the rest (empty list -> "empty")."""
+    if "ok" in reasons:
+        return "ok"
+    if not reasons:
+        return "empty"
+    return max(set(reasons), key=reasons.count)
 
 
 def _team_sections(rows: list[dict], today: str, horizon: str) -> list[dict]:
@@ -279,18 +352,24 @@ def _team_sections(rows: list[dict], today: str, horizon: str) -> list[dict]:
 
 def team(engine, issues: list[dict], store, *, today: dt.date | None = None,
          anchor_days=ANCHOR_DAYS, holidays=frozenset(), skip_weekends: bool = True,
-         room=None, skey: str = "") -> int:
+         room=None, skey: str = "", full: bool | None = None,
+         dry: bool = False, commit: bool = True) -> dict:
     """Shared room standup digest, delta-driven (same rules as `personal`).
 
-    Writes only when the group's issues changed, except on `anchor_days` where
-    it posts a full standup overview. Weekends/holidays are silent.
+    Writes only when the group's issues changed, except on `anchor_days` (or
+    `full=True`) where it posts a full standup overview. Weekends/holidays are
+    silent. `commit=False` (manual) bypasses the per-day dedup and writes no
+    ledger/baseline; `dry=True` renders a sample without dispatching. Returns
+    the uniform `_result` dict.
     """
     today = today or _today()
     iso = today.isoformat()
-    if (skip_weekends and today.weekday() >= 5) or iso in holidays:
+    rcpt = _room_recipients(room)
+    if commit and ((skip_weekends and today.weekday() >= 5) or iso in holidays):
         log.info("team digest: quiet day (%s) — silent", iso)
-        return 0
+        return _result(0, "empty", [])
     is_anchor = today.weekday() in anchor_days
+    is_full = full if full is not None else is_anchor
     sec_horizon = (today + dt.timedelta(days=TEAM_SOON_DAYS)).isoformat()
     snap_horizon = (today + dt.timedelta(days=PERSONAL_SOON_DAYS)).isoformat()
 
@@ -299,25 +378,35 @@ def team(engine, issues: list[dict], store, *, today: dt.date | None = None,
     current = _snapshot(rows, iso, snap_horizon)
     prev = store.get_state(keys.DIGEST_TEAM, gkey)
 
-    if store.already_sent(keys.DIGEST_TEAM, gkey, day=iso):
-        return 0
-    if is_anchor:
+    if commit and store.already_sent(keys.DIGEST_TEAM, gkey, day=iso):
+        return _result(0, "ok", rcpt)
+    if is_full:
         sections = _team_sections(rows, iso, sec_horizon)
         if not sections:
-            return 0
+            return _result(0, "empty", [])
         extra = {"mode": "full", "date": iso, "open_total": len(rows), "sections": sections}
     elif prev is None:
-        store.set_state(keys.DIGEST_TEAM, gkey, current)   # learn baseline silently
-        return 0
+        # Delta with no baseline. Scheduler learns it silently; manual reports it.
+        if commit:
+            store.set_state(keys.DIGEST_TEAM, gkey, current)
+        return _result(0, "no_baseline", [])
     else:
         changes = _diff(prev, current)
         if not any(changes.values()):
-            return 0
+            return _result(0, "no_changes", [])
         extra = {"mode": "delta", "date": iso, "changes": changes}
 
     event = Event(kind=keys.DIGEST_TEAM, action="digest", extra=extra, room=room)
-    return _dispatch(engine, store, keys.DIGEST_TEAM, gkey, event, day=iso,
-                     on_sent=lambda: store.set_state(keys.DIGEST_TEAM, gkey, current))
+    if dry:
+        return _result(0, "ok", rcpt, html=_render(engine, event))
+    result = engine.handle(event)
+    sent = 1 if result.get("sent") else 0
+    if sent and commit:
+        store.mark_sent(keys.DIGEST_TEAM, gkey, day=iso)
+        store.set_state(keys.DIGEST_TEAM, gkey, current)
+    if not sent:
+        log.warning("%s [%s] not delivered: %s", keys.DIGEST_TEAM, gkey, result)
+    return _result(sent, "ok", rcpt, html=_render(engine, event))
 
 
 def _weekly_skip(today: dt.date | None, weekly_day: int, holidays) -> tuple[dt.date, bool]:
@@ -328,16 +417,20 @@ def _weekly_skip(today: dt.date | None, weekly_day: int, holidays) -> tuple[dt.d
 
 
 def triage(engine, issues: list[dict], store, *, today: dt.date | None = None,
-           weekly_day: int = WEEKLY_DAY, holidays=frozenset(), room=None, skey: str = "") -> int:
+           weekly_day: int = WEEKLY_DAY, holidays=frozenset(), room=None, skey: str = "",
+           full: bool | None = None, dry: bool = False, commit: bool = True) -> dict:
     """Shared room, weekly: issues that need a decision (unassigned / no deadline).
 
     A full overview (not a delta) — once a week you want the whole hygiene
-    picture, not just what changed. Runs only on `weekly_day` (default Monday).
+    picture, not just what changed. Runs only on `weekly_day` (default Monday),
+    but a manual run (`commit=False`) ignores the weekly-day gate and the per-day
+    dedup so it always re-sends. `full` is accepted for a uniform call site but
+    has no effect (single-mode pass). `dry=True` renders without dispatching.
     """
     today, skip = _weekly_skip(today, weekly_day, holidays)
-    if skip:
+    if commit and skip:
         log.info("triage digest: not the weekly day (%s) — skip", today.isoformat())
-        return 0
+        return _result(0, "empty", [])
 
     no_assignee = [_row(i) for i in issues if not (i.get("assignees"))]
     no_due = [_row(i) for i in issues if (i.get("assignees")) and not i.get("due_date")]
@@ -349,20 +442,25 @@ def triage(engine, issues: list[dict], store, *, today: dt.date | None = None,
         sections.append({"emoji": "📆", "title": "Без срока", "items": no_due, "show_who": True})
     if not sections:
         log.info("triage digest: nothing to report")
-        return 0
+        return _result(0, "empty", [])
 
     return _emit(engine, store, keys.TRIAGE, keys.ns(skey, "group"), {"sections": sections},
-                 day=today.isoformat(), room=room)
+                 day=today.isoformat(), room=room, commit=commit, dry=dry)
 
 
 def stale(engine, gl, group_id: str, store, days: int = STALE_DAYS, *,
           today: dt.date | None = None, weekly_day: int = WEEKLY_DAY, holidays=frozenset(),
-          room=None, skey: str = "") -> int:
-    """Shared room, weekly: open issues untouched for `days` days (full overview)."""
+          room=None, skey: str = "", full: bool | None = None,
+          dry: bool = False, commit: bool = True) -> dict:
+    """Shared room, weekly: open issues untouched for `days` days (full overview).
+
+    A manual run (`commit=False`) ignores the weekly-day gate and per-day dedup.
+    `full` is accepted but unused (single-mode); `dry=True` renders without send.
+    """
     today, skip = _weekly_skip(today, weekly_day, holidays)
-    if skip:
+    if commit and skip:
         log.info("stale digest: not the weekly day (%s) — skip", today.isoformat())
-        return 0
+        return _result(0, "empty", [])
     cutoff = (today - dt.timedelta(days=days))
     issues = gl.group_issues(
         group_id, state="opened", scope="all",
@@ -378,11 +476,11 @@ def stale(engine, gl, group_id: str, store, days: int = STALE_DAYS, *,
         rows.append(row)
     if not rows:
         log.info("stale digest: nothing to report")
-        return 0
+        return _result(0, "empty", [])
 
     return _emit(engine, store, keys.STALE, keys.ns(skey, "group"),
                  {"days": days, "sections": [{"emoji": "🕸", "title": "Без активности", "items": rows}]},
-                 day=today.isoformat(), room=room)
+                 day=today.isoformat(), room=room, commit=commit, dry=dry)
 
 
 def _percentile(values: list[int], q: float) -> int | None:
@@ -404,8 +502,14 @@ def _median(values: list[int]) -> float | None:
 
 
 def metrics(engine, gl, group_id: str, store, window: int = METRICS_WINDOW,
-            *, room=None, skey: str = "") -> int:
-    """Shared room: weekly issue-flow thermometer (Free-tier, Issues API only)."""
+            *, room=None, skey: str = "", full: bool | None = None,
+            dry: bool = False, commit: bool = True) -> dict:
+    """Shared room: weekly issue-flow thermometer (Free-tier, Issues API only).
+
+    Posts once per ISO week (deduped by week_key). A manual run (`commit=False`)
+    bypasses that dedup and re-sends. `full` is accepted but unused (single-mode);
+    `dry=True` renders without dispatching.
+    """
     today = _today()
     since = today - dt.timedelta(days=window)
 
@@ -435,4 +539,4 @@ def metrics(engine, gl, group_id: str, store, window: int = METRICS_WINDOW,
     # re-send the weekly report.
     week_key = "%s-W%02d" % today.isocalendar()[:2]
     return _emit(engine, store, keys.METRICS, keys.ns(skey, week_key), extra,
-                 day=week_key, room=room)
+                 day=week_key, room=room, commit=commit, dry=dry)

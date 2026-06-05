@@ -291,24 +291,44 @@ def create_admin_router(ctx) -> list[APIRouter]:
         return settings.update_user(login, clean)
 
     @router.post("/api/trigger/{name}")
-    def trigger(name: str):
+    async def trigger(name: str, request: Request):
+        """Manual "Run now". Body: {"mode": "full"|"delta"? , "dry": bool?}.
+
+        Stateless (commit=False) so a click NEVER perturbs the auto-scheduler: it
+        bypasses the per-pass dedup (always sends) and writes no `sent`/`state`
+        ledger. `mode` picks full-overview vs delta for the two delta digests
+        (ignored by single-mode passes); omit it to derive from the anchor day.
+        `dry=True` computes who/what would be sent and renders a real-data sample
+        WITHOUT dispatching."""
         if name not in cron.PASSES:
             raise HTTPException(status_code=400, detail="unknown pass")
+        try:
+            body = await request.json()
+        except Exception:                        # noqa: BLE001 — empty/invalid body -> defaults
+            body = {}
+        mode = body.get("mode")
+        dry = bool(body.get("dry"))
+        full = True if mode == "full" else False if mode == "delta" else None
         url = settings.conn_value("gitlab_url")
-        total, per = 0, []
+        per, recipients = [], set()
         for src in ctx.sources.enabled():
             if not src.get("group_id"):
                 continue
             try:
                 gl = GitLabClient(url, src.get("token", ""))
-                n = cron.run_one(ctx.engine, gl, src["group_id"], ctx.store, name,
-                                 force=True, room=src.get("room"), skey=src["id"])
-                total += n
-                per.append({"source": src["id"], "sent": n})
+                r = cron.run_one(ctx.engine, gl, src["group_id"], ctx.store, name,
+                                 full=full, dry=dry, commit=False,
+                                 room=src.get("room"), skey=src["id"])
+                per.append({"source": src["id"], "sent": r["sent"], "reason": r["reason"],
+                            "recipients": r["recipients"], "html": r["html"]})
+                recipients.update(r["recipients"])
             except Exception as e:               # noqa: BLE001 — one source mustn't fail the rest
                 log.exception("manual trigger %s for %s failed", name, src["id"])
-                per.append({"source": src["id"], "error": str(e)})
-        return {"ok": True, "pass": name, "sent": total, "per": per}
+                per.append({"source": src["id"], "sent": 0, "reason": "error",
+                            "recipients": [], "html": None, "error": str(e)})
+        return {"ok": True, "pass": name, "dry": dry,
+                "per": per, "total_sent": sum(p["sent"] for p in per),
+                "total_recipients": len(recipients)}
 
     @router.post("/api/rule/{event}")
     async def set_rule(event: str, request: Request):

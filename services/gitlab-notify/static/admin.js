@@ -262,15 +262,22 @@ function miniDays(sel,prefix){return DAYS.map((d,i)=>`<span class="day ${sel.inc
 function renderPasses(){
   $('passCards').innerHTML=S.passes.map(p=>{
     const c=S.pass_schedules[p]||{};const hasA=S.has_anchor.includes(p);const info=PASS_INFO[p]||{icon:'•',title:p,desc:''};
+    const sendBtns=hasA
+      ? `<button class="primary sm" onclick="send('${p}','delta',this)">▶ Отправить изменения</button>
+         <button class="primary sm" onclick="send('${p}','full',this)">▶ Отправить всё</button>`
+      : `<button class="primary sm" onclick="send('${p}','',this)">▶ Запустить сейчас</button>`;
     return `<div class="card" data-p="${p}">
       <div class="row" style="margin:0"><div style="font-size:15px"><b>${info.icon} ${esc(info.title)}</b> <span class="mut mono" style="font-size:11px">${esc(p)}</span></div>
         <span class="spacer"></span>
         <label class="row" style="margin:0;gap:6px"><span class="mut" style="font-size:12px">вкл</span><span class="switch"><input type="checkbox" class="pEn" ${c.enabled?'checked':''}><span class="slider"></span></span></label>
-        <button class="sm" onclick="passExample('${info.tpl}',this)">👁 пример</button>
+        <button class="sm" onclick="passExample('${info.tpl}',this)">👁 Пример</button>
         <button class="sm" onclick="editTpl('${info.tpl}')">✎ шаблон</button>
-        <button class="sm" onclick="trigger('${p}',this)">▶ Запустить сейчас</button></div>
+        <button class="sm" onclick="previewPass('${p}',this)">🔍 Предпросмотр</button>
+        <span class="sendsep" title="ниже — реальная отправка"></span>
+        ${sendBtns}</div>
       <p class="hint" style="margin:6px 0 12px">${esc(info.desc)}</p>
       <div class="bubble pEx hide" style="margin-bottom:10px"></div>
+      <div class="pPreview" style="margin-bottom:10px"></div>
       <div class="row" style="margin:0"><span class="mut">Дни:</span><div class="days pDays">${miniDays(c.days||[],'d')}</div>
         <span class="mut" style="margin-left:8px">Время:</span><input type="time" class="pTime" value="${esc(c.time||'09:00')}">
         ${hasA?`<span class="mut" style="margin-left:8px" title="полный обзор вместо «только изменения»">⚓ Якорь:</span><div class="days pAnchor">${miniDays(c.anchor_days||[],'a')}</div>`:''}
@@ -300,14 +307,79 @@ async function passExample(tpl,btn){
   box.innerHTML=r.ok?r.html:'<span class="err">'+esc(r.error||'ошибка')+'</span>';
 }
 function editTpl(tpl){switchTab('tpl');$('tplSelect').value=tpl+'.matrix.html.j2';loadTpl();}
-async function trigger(name,btn){
-  const card=btn.closest('.card');const res=card?card.querySelector('.pResult'):null;
+// Manual "Run now" — мягкие RU-пояснения причин (нейтральные, не ошибка).
+const REASON_INFO={
+  no_changes:'Изменений нет — отправлять нечего (это нормально)',
+  no_baseline:'Пока нет базовой точки — отправьте «Отправить всё» один раз, чтобы её задать',
+  empty:'Нет подходящих задач',
+};
+// Причины, при которых ничего не уйдёт (и слать не нужно).
+function isNoSend(reason){return reason==='no_changes'||reason==='no_baseline'||reason==='empty';}
+// mode → JSON-параметры запроса (пустой mode = single-mode pass, не передаём).
+function modeBody(mode,dry){const b={dry:!!dry};if(mode)b.mode=mode;return b;}
+// Рендер одной строки источника (предпросмотр / результат) с пузырём сообщения.
+function perRow(r){
+  if(r.reason==='error')
+    return `<div class="bubble"><span class="err">✗ ${esc(r.error||'ошибка')}</span></div>`;
+  if(r.reason==='ok'){
+    const who=(r.recipients||[]).map(esc).join(', ')||'—';
+    return `<div style="margin-bottom:6px"><span class="mut">Кому:</span> <b>${who}</b></div>`
+      +(r.html?`<div class="bubble">${r.html}</div>`:'');
+  }
+  return `<div class="pinfo">${esc(REASON_INFO[r.reason]||r.reason)}</div>`;
+}
+function renderPer(box,per){
+  box.innerHTML=(per||[]).map(r=>
+    `<div style="margin-bottom:10px"><div class="mut mono" style="font-size:11px;margin-bottom:4px">${esc(r.source)}</div>${perRow(r)}</div>`
+  ).join('')||'<div class="pinfo">Нет включённых групп.</div>';
+}
+// 🔍 Предпросмотр — что и кому реально уйдёт сейчас (реальные данные), но НЕ шлёт.
+async function previewPass(name,btn){
+  const card=btn.closest('.card');const box=card.querySelector('.pPreview');
+  const hasA=S.has_anchor.includes(name);const mode=hasA?'delta':'';
+  btn.disabled=true;const o=btn.textContent;btn.textContent='⏳…';
+  box.innerHTML='<span class="mut">загрузка…</span>';
+  try{const r=await api('/trigger/'+name,'POST',modeBody(mode,true));
+    if(r.ok)renderPer(box,r.per);
+    else box.innerHTML='<span class="err">'+esc(r.error||'ошибка')+'</span>';
+  }catch(e){box.innerHTML='<span class="err">'+esc(e)+'</span>';}
+  btn.disabled=false;btn.textContent=o;
+}
+// ▶ Отправить — сначала dry (узнать, что уйдёт), потом — реальная отправка.
+async function send(name,mode,btn){
+  const card=btn.closest('.card');const res=card.querySelector('.pResult');
   btn.disabled=true;const o=btn.textContent;btn.textContent='⏳ запуск…';
-  if(res){res.style.color='var(--mut)';res.textContent='Запускаю…';}
-  try{const r=await api('/trigger/'+name,'POST');
-    if(r.ok){const m=`✓ отправлено получателям: ${r.sent}`;toast(`«${name}»: отправлено ${r.sent}`);if(res){res.style.color='var(--ok)';res.textContent=m;}}
-    else{const m='✗ ошибка: '+(r.error||'неизвестно');toast('Ошибка триггера',true);if(res){res.style.color='var(--bad)';res.textContent=m;}}
-  }catch(e){if(res){res.style.color='var(--bad)';res.textContent='✗ '+e;}toast('Ошибка',true);}
+  res.style.color='var(--mut)';res.textContent='Проверяю, что уйдёт…';
+  try{
+    const dryR=await api('/trigger/'+name,'POST',modeBody(mode,true));
+    if(!dryR.ok){res.style.color='var(--bad)';res.textContent='✗ '+(dryR.error||'ошибка');toast('Ошибка',true);btn.disabled=false;btn.textContent=o;return;}
+    // Ничего не уйдёт ни по одному источнику — объясняем и не шлём.
+    const per=dryR.per||[];
+    const sendable=per.filter(r=>r.reason==='ok'||r.reason==='error');
+    if(per.length&&!sendable.length){
+      res.style.color='';res.innerHTML=per.map(r=>`<div class="pinfo">${esc(r.source)}: ${esc(REASON_INFO[r.reason]||r.reason)}</div>`).join('');
+      toast('Ничего не отправлено — нечего слать');btn.disabled=false;btn.textContent=o;return;
+    }
+    // DM-рассылка (личка каждому исполнителю) — подтверждение.
+    if((name==='digest'||name==='overdue')&&dryR.total_recipients>0){
+      const all=[];per.forEach(r=>{if(r.reason==='ok')(r.recipients||[]).forEach(x=>all.push(x));});
+      const uniq=[...new Set(all)];const shown=uniq.slice(0,12).join(', ')+(uniq.length>12?', …':'');
+      if(!confirm(`Разослать ${dryR.total_recipients} личных сообщений (получателям: ${shown}) сейчас? Сообщение уйдёт каждому исполнителю.`)){
+        res.style.color='var(--mut)';res.textContent='Отменено.';btn.disabled=false;btn.textContent=o;return;
+      }
+    }
+    // Реальная отправка.
+    res.textContent='Отправляю…';
+    const r=await api('/trigger/'+name,'POST',modeBody(mode,false));
+    if(!r.ok){res.style.color='var(--bad)';res.textContent='✗ '+(r.error||'ошибка');toast('Ошибка триггера',true);btn.disabled=false;btn.textContent=o;return;}
+    const errs=(r.per||[]).filter(x=>x.reason==='error');
+    const lines=(r.per||[]).filter(x=>!isNoSend(x.reason)).map(x=>
+      x.reason==='error'?`<div class="pinfo"><span class="err">${esc(x.source)}: ✗ ${esc(x.error||'ошибка')}</span></div>`
+                        :`<div class="pinfo">${esc(x.source)}: уйдёт ${x.reason==='ok'?(x.recipients||[]).length:0}</div>`);
+    res.style.color='';
+    res.innerHTML=`<div style="color:var(--ok);font-weight:600;margin-bottom:4px">✓ Отправлено: ${r.total_sent}</div>`+lines.join('');
+    toast(errs.length?`«${name}»: отправлено ${r.total_sent}, ошибок ${errs.length}`:`«${name}»: отправлено ${r.total_sent}`,!!errs.length);
+  }catch(e){res.style.color='var(--bad)';res.textContent='✗ '+e;toast('Ошибка',true);}
   btn.disabled=false;btn.textContent=o;
 }
 async function loadTpl(){const name=$('tplSelect').value;if(!name)return;const r=await api('/template?name='+encodeURIComponent(name));

@@ -187,10 +187,10 @@ def test_metrics_once_per_week_regardless_of_weekday(tmp_path, monkeypatch):
             return cls(2026, 6, 3)           # Wednesday, same ISO week
 
     monkeypatch.setattr(digests.dt, "date", _MonDate)
-    assert digests.metrics(engine, gl, "g1", store, skey="s1") == 1   # first send
+    assert digests.metrics(engine, gl, "g1", store, skey="s1")["sent"] == 1   # first send
 
     monkeypatch.setattr(digests.dt, "date", _WedDate)
-    assert digests.metrics(engine, gl, "g1", store, skey="s1") == 0   # same week -> no-op
+    assert digests.metrics(engine, gl, "g1", store, skey="s1")["sent"] == 0   # same week -> no-op
     assert engine.handled == 1               # engine.handle called exactly once
 
 
@@ -203,3 +203,175 @@ def test_parse_days():
 def test_parse_day_fallback():
     assert digests.parse_day("mon") == 0
     assert digests.parse_day("garbage", default=3) == 3
+
+
+# === manual "Run now": modes + stateless + dry =============================
+# These pin the redesigned manual-trigger backend (cron.run_one calls team /
+# personal with full / dry / commit). Invariants:
+#   * commit=True  (scheduler/host-cron) — unchanged: dedups, learns baseline.
+#   * commit=False (manual) — stateless + repeatable: bypasses the dedup gate,
+#     writes no `sent`/`state` rows, so it can't perturb the auto-scheduler.
+#   * full=True/False — explicit mode override (full overview vs delta).
+#   * dry=True — computes recipients + renders html WITHOUT dispatching.
+import datetime as dt   # noqa: E402
+
+import keys             # noqa: E402
+
+
+class _RecordingEngine:
+    """Engine fake with the surface digests touch: handle (records calls +
+    delivers), match (returns a rule with a template), and a renderer whose
+    render() returns a marker so we can assert html was produced."""
+    def __init__(self, deliver: bool = True):
+        self.deliver = deliver
+        self.handled: list = []
+        self.renderer = self
+        self.settings = self
+
+    def handle(self, event):
+        self.handled.append(event)
+        return {"sent": ["room"]} if self.deliver else {"sent": []}
+
+    def match(self, event):
+        return {"template": event.kind, "to": ["dm"]}
+
+    def render(self, template, channel, ctx):    # renderer.render
+        return f"<html {template}>"
+
+    def pass_schedule(self, name):               # settings.pass_schedule (stale)
+        return {}
+
+
+# Pin a deterministic non-anchor weekday (Tuesday 2026-06-02) so delta mode is
+# the default; tests pass full=True explicitly when they want a full overview.
+TUE = dt.date(2026, 6, 2)
+
+
+def _person_issue(iid, login, *, due=None, labels=None):
+    return {"iid": iid, "title": f"i{iid}", "web_url": f"u/{iid}", "due_date": due,
+            "labels": labels or [], "assignees": [{"username": login}]}
+
+
+# --- (a) manual is repeatable + writes no ledger -------------------------
+def test_personal_manual_repeatable_no_ledger(tmp_path):
+    store = Store(path=str(tmp_path / "s.db"))
+    engine = _RecordingEngine()
+    issues = [_person_issue(1, "misha", due="2026-06-10")]
+    r1 = digests.personal(engine, issues, store, today=TUE, full=True, commit=False)
+    r2 = digests.personal(engine, issues, store, today=TUE, full=True, commit=False)
+    assert r1["sent"] == 1 and r2["sent"] == 1            # both send (no per-day dedup)
+    assert len(engine.handled) == 2
+    pkey = keys.ns("", "misha")
+    assert not store.already_sent(keys.DIGEST_PERSONAL, pkey, day="2026-06-02")
+    assert store.get_state(keys.DIGEST_PERSONAL, pkey) is None   # no baseline written
+
+
+def test_team_manual_repeatable_no_ledger(tmp_path):
+    store = Store(path=str(tmp_path / "s.db"))
+    engine = _RecordingEngine()
+    issues = [_person_issue(1, "misha", due="2026-06-01")]   # overdue -> a section exists
+    r1 = digests.team(engine, issues, store, today=TUE, full=True, commit=False, room="!r")
+    r2 = digests.team(engine, issues, store, today=TUE, full=True, commit=False, room="!r")
+    assert r1["sent"] == 1 and r2["sent"] == 1
+    assert r1["recipients"] == ["room:!r"]
+    gkey = keys.ns("", "group")
+    assert not store.already_sent(keys.DIGEST_TEAM, gkey, day="2026-06-02")
+    assert store.get_state(keys.DIGEST_TEAM, gkey) is None
+
+
+# --- (b) full sends overview; delta needs a baseline ---------------------
+def test_personal_full_sends_overview(tmp_path):
+    store = Store(path=str(tmp_path / "s.db"))
+    engine = _RecordingEngine()
+    issues = [_person_issue(1, "misha", due="2026-06-10")]
+    r = digests.personal(engine, issues, store, today=TUE, full=True, commit=False)
+    assert r["sent"] == 1 and r["reason"] == "ok"
+    assert r["recipients"] == ["misha"]                  # dm pass -> assignee logins
+    assert engine.handled[0].extra["mode"] == "full"
+
+
+def test_personal_delta_with_baseline_sends_on_change(tmp_path):
+    store = Store(path=str(tmp_path / "s.db"))
+    engine = _RecordingEngine()
+    # Seed a baseline via a committed run on an anchor day, then change the issue.
+    base = [_person_issue(1, "misha", due="2026-06-10")]
+    digests.personal(engine, base, store, today=TUE, full=True, commit=True)
+    changed = [_person_issue(1, "misha", due="2026-06-03")]   # due moved -> a delta
+    r = digests.personal(engine, changed, store, today=TUE, full=False, commit=False)
+    assert r["sent"] == 1 and r["reason"] == "ok"
+    assert engine.handled[-1].extra["mode"] == "delta"
+
+
+# --- (c) delta with NO baseline + manual -> no_baseline, not seeded -------
+def test_personal_delta_no_baseline_manual(tmp_path):
+    store = Store(path=str(tmp_path / "s.db"))
+    engine = _RecordingEngine()
+    issues = [_person_issue(1, "misha", due="2026-06-10")]
+    r = digests.personal(engine, issues, store, today=TUE, full=False, commit=False)
+    assert r["sent"] == 0 and r["reason"] == "no_baseline"
+    assert engine.handled == []                          # nothing sent
+    assert store.get_state(keys.DIGEST_PERSONAL, keys.ns("", "misha")) is None   # NOT seeded
+
+
+def test_team_delta_no_baseline_manual(tmp_path):
+    store = Store(path=str(tmp_path / "s.db"))
+    engine = _RecordingEngine()
+    issues = [_person_issue(1, "misha", due="2026-06-10")]
+    r = digests.team(engine, issues, store, today=TUE, full=False, commit=False, room="!r")
+    assert r["sent"] == 0 and r["reason"] == "no_baseline"
+    assert engine.handled == []
+    assert store.get_state(keys.DIGEST_TEAM, keys.ns("", "group")) is None
+
+
+# --- (d) dry returns recipients + html and does NOT dispatch/log ----------
+def test_personal_dry_renders_without_dispatch(tmp_path):
+    store = Store(path=str(tmp_path / "s.db"))
+    engine = _RecordingEngine()
+    issues = [_person_issue(1, "misha", due="2026-06-10")]
+    r = digests.personal(engine, issues, store, today=TUE, full=True, commit=False, dry=True)
+    assert r["sent"] == 0 and r["reason"] == "ok"        # "ok" = would send
+    assert r["recipients"] == ["misha"]
+    assert r["html"] == "<html digest_personal>"         # real-data sample rendered
+    assert engine.handled == []                          # dry NEVER dispatches
+    assert store.get_state(keys.DIGEST_PERSONAL, keys.ns("", "misha")) is None
+
+
+def test_team_dry_renders_without_dispatch(tmp_path):
+    store = Store(path=str(tmp_path / "s.db"))
+    engine = _RecordingEngine()
+    issues = [_person_issue(1, "misha", due="2026-06-01")]
+    r = digests.team(engine, issues, store, today=TUE, full=True, commit=False, dry=True, room="!r")
+    assert r["sent"] == 0 and r["reason"] == "ok"
+    assert r["recipients"] == ["room:!r"]
+    assert r["html"] == "<html digest_team>"
+    assert engine.handled == []
+
+
+# --- (e) scheduler path (commit=True) still dedups + learns baseline -------
+def test_personal_commit_writes_ledger_and_baseline(tmp_path):
+    store = Store(path=str(tmp_path / "s.db"))
+    engine = _RecordingEngine()
+    issues = [_person_issue(1, "misha", due="2026-06-10")]
+    r1 = digests.personal(engine, issues, store, today=TUE, full=True, commit=True)
+    assert r1["sent"] == 1
+    pkey = keys.ns("", "misha")
+    assert store.already_sent(keys.DIGEST_PERSONAL, pkey, day="2026-06-02")   # mark_sent written
+    assert store.get_state(keys.DIGEST_PERSONAL, pkey) is not None            # baseline learned
+    # second commit run same day is a no-op (dedup gate holds)
+    r2 = digests.personal(engine, issues, store, today=TUE, full=True, commit=True)
+    assert r2["sent"] == 0
+    assert len(engine.handled) == 1
+
+
+def test_team_commit_writes_ledger_and_baseline(tmp_path):
+    store = Store(path=str(tmp_path / "s.db"))
+    engine = _RecordingEngine()
+    issues = [_person_issue(1, "misha", due="2026-06-01")]
+    r1 = digests.team(engine, issues, store, today=TUE, full=True, commit=True, room="!r")
+    assert r1["sent"] == 1
+    gkey = keys.ns("", "group")
+    assert store.already_sent(keys.DIGEST_TEAM, gkey, day="2026-06-02")
+    assert store.get_state(keys.DIGEST_TEAM, gkey) is not None
+    r2 = digests.team(engine, issues, store, today=TUE, full=True, commit=True, room="!r")
+    assert r2["sent"] == 0
+    assert len(engine.handled) == 1
