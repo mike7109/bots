@@ -87,11 +87,13 @@ def seed_from_env(sources: Sources, *, group_id, token, room) -> None:
     so nothing breaks. Best-effort validate to fill full_path for routing."""
     if sources.all() or not group_id:
         return
-    src = {"id": "default", "name": "По умолчанию (из env)", "group_id": group_id,
+    src = {"id": "default", "name": "Основная группа", "group_id": group_id,
            "token": token or "", "room": room or "", "enabled": True}
     if token:
         v = sources.validate(group_id, token)
         if v.get("ok"):
             src["full_path"] = v.get("full_path")
             src["group_name"] = v.get("group_name")
+            if v.get("group_name"):
+                src["name"] = v["group_name"]      # name it after the GitLab group
     sources.upsert(src)

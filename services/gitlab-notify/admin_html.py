@@ -392,7 +392,8 @@ function srcCard(s){
     <div class="row" style="margin:10px 0 0"><span class="mut">GitLab группа ID:</span>
       <input class="sGid" value="${esc(s.group_id||'')}" placeholder="напр. 12" style="width:90px">
       <span class="mut">Токен:</span>
-      <input class="sTok" type="password" placeholder="${s.has_token?esc(s.token_masked)+' (не менять — пусто)':'glpat-…'}" style="width:180px">
+      <input class="sTok" type="password" placeholder="${s.has_token?'введите, чтобы изменить':'glpat-…'}" style="width:160px">
+      ${s.has_token?`<span class="badge sent">✅ ${esc(s.token_masked)}</span>`:'<span class="badge error">нет</span>'}
       <span class="mut">Комната:</span>
       <input class="sRoom" value="${esc(s.room||'')}" placeholder="!room:server" style="width:220px"></div>
     <div class="row" style="margin:10px 0 0">
