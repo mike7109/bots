@@ -143,9 +143,9 @@ def create_admin_router(engine) -> APIRouter:
             rules.append({
                 "event": r.get("event"), "actions": r.get("actions"),
                 "template": r.get("template"),
-                "to": ov.get("to", r.get("to")),       # effective destination
+                "to": ov.get("to", r.get("to")),                 # effective destination
                 "default_to": r.get("to"),
-                "enabled": ov.get("enabled", True),
+                "enabled": ov.get("enabled", r.get("enabled", True)),  # config default, admin overrides
             })
         return {
             "enabled": g["enabled"],

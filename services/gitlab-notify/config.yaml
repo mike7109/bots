@@ -55,14 +55,17 @@ rules:
     template: metrics
     to: [room]
 
-  # --- Personal DMs are OFF for now ------------------------------------------
-  # The capability exists (transport `dm`, templates overdue / digest_personal).
-  # To turn these on, the person accepts the bot's DM invite once, then it's
-  # silent. Uncomment to enable overdue reminders / the "what's on me" digest.
-  # - event: overdue               # cron: due date already passed -> personal DM
-  #   template: overdue
-  #   to: [dm]
-  #   mention: assignee
-  # - event: digest_personal       # cron digest: "what's on me" -> personal DM
-  #   template: digest_personal
-  #   to: [dm]
+  # --- Personal DMs: present but OFF by default -------------------------------
+  # These ship disabled so they show up in the admin panel (Правила) and can be
+  # turned on with one toggle — no YAML edit, no restart. When you enable them,
+  # the bot DMs assignees (each accepts the bot's invite once, then it's silent).
+  - event: overdue                 # cron: due date already passed -> personal DM
+    template: overdue
+    to: [dm]
+    mention: assignee
+    enabled: false
+
+  - event: digest_personal         # cron digest: "what's on me" -> personal DM
+    template: digest_personal
+    to: [dm]
+    enabled: false

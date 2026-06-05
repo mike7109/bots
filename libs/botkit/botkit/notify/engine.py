@@ -65,15 +65,18 @@ class Engine:
         if rule is None:
             return {"ignored": "no matching rule", "kind": event.kind, "action": event.action}
 
-        # Admin rule override: disable a rule, or change its destination.
-        if self.settings is not None:
-            ov = self.settings.rule_override(event.kind)
-            if ov:
-                if ov.get("enabled") is False:
-                    self._record(event, "ignored", "", "правило выключено в админке")
-                    return {"ignored": "rule disabled (admin)", "kind": event.kind}
-                if ov.get("to"):
-                    rule = {**rule, "to": ov["to"]}
+        # Effective on/off: a rule may ship `enabled: false` in config (present but
+        # off, e.g. personal DMs); the admin override flips it without editing YAML.
+        enabled = rule.get("enabled", True)
+        ov = self.settings.rule_override(event.kind) if self.settings is not None else None
+        if ov:
+            if "enabled" in ov:
+                enabled = ov["enabled"]
+            if ov.get("to"):
+                rule = {**rule, "to": ov["to"]}
+        if not enabled:
+            self._record(event, "ignored", "", "правило выключено")
+            return {"ignored": "rule disabled", "kind": event.kind}
 
         destinations = rule.get("to") or self.defaults.get("to", ["room"])
         ctx = asdict(event)
