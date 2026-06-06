@@ -157,7 +157,11 @@ async def poke(request: Request, authorization: str = Header(default="")):
     else:
         title = escape(issue.get("title") or "")
         web_url = issue.get("web_url") or ""
-        html = (f"🔔 Тебя пнули по задаче <b>#{escape(iid)} {title}</b><br>"
+        # Optional «who poked» — issue-graph may send the actor's name/login.
+        by = body.get("poked_by")
+        by = by.strip() if isinstance(by, str) else ""
+        who = f"<b>{escape(by)}</b> пнул тебя" if by else "Тебя пнули"
+        html = (f"🔔 {who} по задаче <b>#{escape(iid)} {title}</b><br>"
                 f'<a href="{escape(_safe_url(web_url))}">{escape(web_url)}</a>')
 
     # 8) Send the DM directly (bypass mute, no room fallback).

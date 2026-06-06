@@ -306,3 +306,20 @@ def test_default_message_neutralises_hostile_url(store, settings, identity, monk
     assert client.post("/api/poke", json=body, headers=_auth()).status_code == 200
     html = mx.sends[0]["html"]
     assert "javascript:" not in html.split('href="')[1].split('"')[0]
+
+
+# --- optional «who poked» --------------------------------------------
+def test_poked_by_shows_actor_escaped(store, settings, identity, monkeypatch):
+    mx = FakeMatrix()
+    client = _client(store, settings, identity, mx, _guard(store), monkeypatch)
+    assert client.post("/api/poke", json=_body(poked_by="Иван <x>"), headers=_auth()).status_code == 200
+    html = mx.sends[0]["html"]
+    assert "пнул тебя" in html and "Иван" in html
+    assert "<x>" not in html and "&lt;x&gt;" in html   # actor name escaped
+
+
+def test_no_poked_by_keeps_generic_message(store, settings, identity, monkeypatch):
+    mx = FakeMatrix()
+    client = _client(store, settings, identity, mx, _guard(store), monkeypatch)
+    assert client.post("/api/poke", json=_body(), headers=_auth()).status_code == 200
+    assert "Тебя пнули" in mx.sends[0]["html"]
