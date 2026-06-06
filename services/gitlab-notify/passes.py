@@ -77,6 +77,20 @@ class Pass:
 
 WORKDAYS = [0, 1, 2, 3, 4]
 
+# The two DELTA digests run on an INTERVAL within the active-hours window (Phase
+# 3a), modelled on Prometheus Alertmanager: `every_hours` is the regular cadence
+# ceiling (group_interval) — send at least this often when something changed;
+# `change_threshold` sends early on a burst (group_wait-as-threshold);
+# `floor_min` is the spam-guard / evaluation throttle (min minutes between
+# evaluations and sends). Calendar passes carry no `kind` (treated as "daily").
+INTERVAL_DELTA_DEFAULTS = {
+    "kind": "interval",
+    "every_hours": 2.5,        # cadence ceiling: send at least this often on change
+    "floor_min": 20,           # min minutes between evaluations/sends (spam guard)
+    "change_threshold": 5,     # send early once >= N items changed since last send
+    "days": WORKDAYS,          # workdays only
+}
+
 
 # --- per-pass run adapters -----------------------------------------------
 # Each adapter is one branch of the old cron.run_one if-chain. They share the
@@ -188,7 +202,7 @@ _PASSES = [
         description="Каждому в личку, что изменилось со вчера: новые/снятые задачи, перенос срока, переход в просрочку. По умолчанию пн/вт/чт.",
         category="personal", trigger="schedule", template="digest_personal",
         event_kind=keys.DIGEST_PERSONAL, to=("dm",), mention=None, mode="delta", daily=True,
-        schedule_defaults={"enabled": True, "days": [0, 1, 3], "time": "09:00"},
+        schedule_defaults={"enabled": True, "time": "09:00", **INTERVAL_DELTA_DEFAULTS},
         run=_run_digest_delta,
     ),
     Pass(
@@ -204,7 +218,7 @@ _PASSES = [
         description="Что изменилось в задачах команды со вчера → в общую комнату. По умолчанию пн/вт/чт.",
         category="group", trigger="schedule", template="digest_team",
         event_kind=keys.DIGEST_TEAM, to=("room",), mention=None, mode="delta", daily=True,
-        schedule_defaults={"enabled": True, "days": [0, 1, 3], "time": "09:30"},
+        schedule_defaults={"enabled": True, "time": "09:30", **INTERVAL_DELTA_DEFAULTS},
         run=_run_team_delta,
     ),
     Pass(

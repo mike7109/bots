@@ -143,6 +143,12 @@ def _diff(prev: dict, cur: dict) -> dict:
     return out
 
 
+def _n_changes(changes: dict) -> int:
+    """How many items changed across all delta buckets (the interval scheduler's
+    early-send `change_threshold` is measured against this)."""
+    return sum(len(v) for v in changes.values())
+
+
 def _by_due(rows: list[dict]) -> list[dict]:
     return sorted(rows, key=lambda r: r["due"] or "")
 
@@ -174,14 +180,17 @@ def _emit(engine, store, kind: str, dedup_key: str, extra: dict, assignees=None,
 
 
 # --- manual "Run now" plumbing: uniform result + real-data preview -------
-def _result(sent: int, reason: str, recipients=None, *, html=None) -> dict:
-    """The uniform shape every pass returns: {sent, reason, recipients, html}.
+def _result(sent: int, reason: str, recipients=None, *, html=None, n_changes: int = 0) -> dict:
+    """The uniform shape every pass returns: {sent, reason, recipients, html, n_changes}.
 
     `reason` ∈ {ok, no_changes, no_baseline, empty, error}. `recipients` is
     ["room:<id>"] for room passes or the list of assignee logins for dm passes.
     `html` is a rendered real-data sample (set for dry AND real sends).
+    `n_changes` is the number of changed items a DELTA pass found (0 otherwise);
+    the interval scheduler reads it for the early-send `change_threshold` gate.
     """
-    return {"sent": sent, "reason": reason, "recipients": list(recipients or []), "html": html}
+    return {"sent": sent, "reason": reason, "recipients": list(recipients or []),
+            "html": html, "n_changes": n_changes}
 
 
 def _room_recipients(room) -> list[str]:
@@ -365,6 +374,7 @@ def personal(engine, issues: list[dict], store, *, today: dt.date | None = None,
     recipients: list[str] = []          # logins this run sent to (or would send to)
     reasons: list[str] = []             # per-person would-be reason (for aggregation)
     sample_html = None                  # first recipient's rendered message
+    n_changes = 0                       # total changed items across delta recipients
     for login, items in sorted(by_user.items()):
         pkey = keys.ns(skey, login)
         if commit and store.already_sent(keys.DIGEST_PERSONAL, pkey, day=iso):  # one DM per person per day
@@ -392,6 +402,7 @@ def personal(engine, issues: list[dict], store, *, today: dt.date | None = None,
             if not any(changes.values()):
                 reasons.append("no_changes")
                 continue                                    # nothing changed -> silent
+            n_changes += _n_changes(changes)
             extra = {"mode": "delta", "date": iso, "changes": changes}
 
         event = Event(kind=keys.DIGEST_PERSONAL, action="digest", assignees=[login], extra=extra, room=room)
@@ -415,7 +426,7 @@ def personal(engine, issues: list[dict], store, *, today: dt.date | None = None,
     log.info("personal digest: %d sent (%s)", sent, "full" if is_full else "delta")
     reason = _aggregate_reason(reasons)
     # dry/real: recipients = logins it would DM (only the "ok" ones).
-    return _result(sent, reason, recipients, html=sample_html)
+    return _result(sent, reason, recipients, html=sample_html, n_changes=n_changes)
 
 
 def _aggregate_reason(reasons: list[str]) -> str:
@@ -500,9 +511,11 @@ def team(engine, issues: list[dict], store, *, today: dt.date | None = None,
             return _result(0, "no_changes", [])
         extra = {"mode": "delta", "date": iso, "changes": changes}
 
+    # n_changes feeds the interval scheduler's early-send threshold (0 for full).
+    n_changes = 0 if is_full else _n_changes(extra["changes"])
     event = Event(kind=keys.DIGEST_TEAM, action="digest", extra=extra, room=room)
     if dry:
-        return _result(0, "ok", rcpt, html=_render(engine, event))
+        return _result(0, "ok", rcpt, html=_render(engine, event), n_changes=n_changes)
     result = engine.handle(event)
     sent = 1 if result.get("sent") else 0
     if sent and commit:
@@ -513,7 +526,7 @@ def team(engine, issues: list[dict], store, *, today: dt.date | None = None,
             store.set_state(keys.DIGEST_TEAM, gkey, current)
     if not sent:
         log.warning("%s [%s] not delivered: %s", keys.DIGEST_TEAM, gkey, result)
-    return _result(sent, "ok", rcpt, html=_render(engine, event))
+    return _result(sent, "ok", rcpt, html=_render(engine, event), n_changes=n_changes)
 
 
 def _weekly_skip(today: dt.date | None, weekly_day: int, holidays) -> tuple[dt.date, bool]:

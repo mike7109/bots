@@ -22,13 +22,17 @@ from botkit.store import Store
 # .PASS_DEFAULTS / cron.PASSES / DAILY). Phase 2a: digest/team are gone, replaced
 # by the four split passes — full on Wed/Fri, delta on Mon/Tue/Thu.
 WORKDAYS = [0, 1, 2, 3, 4]
+# Phase 3a: the two DELTA digests carry an INTERVAL schedule (kind="interval" +
+# every_hours/floor_min/change_threshold, days=WORKDAYS); the others stay daily.
+_INTERVAL = {"kind": "interval", "every_hours": 2.5, "floor_min": 20,
+             "change_threshold": 5, "days": WORKDAYS}
 EXPECTED_PASS_DEFAULTS = {
     "due":          {"enabled": True,  "days": WORKDAYS,  "time": "09:00"},
     "overdue":      {"enabled": True,  "days": WORKDAYS,  "time": "09:00"},
     "digest_full":  {"enabled": True,  "days": [2, 4],    "time": "09:00"},
-    "digest_delta": {"enabled": True,  "days": [0, 1, 3], "time": "09:00"},
+    "digest_delta": {"enabled": True,  "time": "09:00", **_INTERVAL},
     "team_full":    {"enabled": True,  "days": [2, 4],    "time": "09:30"},
-    "team_delta":   {"enabled": True,  "days": [0, 1, 3], "time": "09:30"},
+    "team_delta":   {"enabled": True,  "time": "09:30", **_INTERVAL},
     "triage":       {"enabled": True,  "days": [0],       "time": "10:00"},
     "stale":        {"enabled": True,  "days": [0],       "time": "10:00", "days_idle": 14},
     "metrics":      {"enabled": False, "days": [0],       "time": "10:00"},
@@ -140,7 +144,7 @@ def test_each_scheduled_run_adapter_is_callable_with_uniform_signature(tmp_path)
         # Uniform signature: keyword-only full/dry/commit/room/skey.
         result = p.run(engine, gl, "g1", issues, store,
                        full=None, dry=False, commit=False, room="!r", skey="s1")
-        assert set(result) == {"sent", "reason", "recipients", "html"}, name
+        assert set(result) == {"sent", "reason", "recipients", "html", "n_changes"}, name
         store.close()
 
 
@@ -154,7 +158,8 @@ def test_run_one_team_full_sends_overview_and_leaves_baseline(tmp_path):
     gl = _GitLab([_issue(1, gid=11, due=(dt.date.today() - dt.timedelta(days=1)).isoformat())])
     # anchor=False, full=None on purpose: the split adapter ignores both.
     r1 = cron.run_one(engine, gl, "g1", store, "team_full", room="!r", skey="s1")
-    assert r1 == {"sent": 1, "reason": "ok", "recipients": ["room:!r"], "html": "<digest_team>"}
+    assert r1 == {"sent": 1, "reason": "ok", "recipients": ["room:!r"],
+                  "html": "<digest_team>", "n_changes": 0}      # full -> 0 changes
     assert engine.handled[0].extra["mode"] == "full"
     assert store.already_sent("digest_team", "s1:group")
     assert store.get_state("digest_team", "s1:group") is None       # baseline NOT written

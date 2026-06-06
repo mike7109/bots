@@ -257,8 +257,15 @@ def create_admin_router(ctx) -> list[APIRouter]:
     async def set_global(request: Request):
         patch = await request.json()
         allowed = {"enabled", "scheduler_on", "anchor_days", "weekly_day",
-                   "skip_weekends", "holidays", "holidays_auto"}
-        return settings.update_global({k: v for k, v in patch.items() if k in allowed})
+                   "skip_weekends", "holidays", "holidays_auto",
+                   "delta_quiet_after_full_h"}
+        clean = {k: v for k, v in patch.items() if k in allowed}
+        if "delta_quiet_after_full_h" in clean:          # hours >= 0 (0 = off)
+            try:
+                clean["delta_quiet_after_full_h"] = max(0.0, float(clean["delta_quiet_after_full_h"]))
+            except (ValueError, TypeError):
+                clean.pop("delta_quiet_after_full_h")     # ignore garbage, keep prior
+        return settings.update_global(clean)
 
     @router.post("/api/active-hours")
     async def set_active_hours(request: Request):
@@ -316,6 +323,22 @@ def create_admin_router(ctx) -> list[APIRouter]:
         if "days_idle" in body:                          # stale: N days of inactivity
             try:
                 clean["days_idle"] = max(1, int(body["days_idle"]))
+            except (ValueError, TypeError):
+                pass
+        # Interval-pass tuning (the delta digests): cadence, eval floor, burst threshold.
+        if "every_hours" in body:
+            try:
+                clean["every_hours"] = max(0.25, float(body["every_hours"]))
+            except (ValueError, TypeError):
+                pass
+        if "floor_min" in body:
+            try:
+                clean["floor_min"] = max(1, int(body["floor_min"]))
+            except (ValueError, TypeError):
+                pass
+        if "change_threshold" in body:
+            try:
+                clean["change_threshold"] = max(0, int(body["change_threshold"]))
             except (ValueError, TypeError):
                 pass
         return settings.update_pass(name, clean)

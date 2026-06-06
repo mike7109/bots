@@ -412,3 +412,51 @@ def test_team_delta_commit_owns_and_advances_baseline(tmp_path):
     r1 = digests.team(engine, changed, store, today=TUE, full=False, commit=True, room="!r")
     assert r1["sent"] == 1 and engine.handled[-1].extra["mode"] == "delta"
     assert store.get_state(keys.DIGEST_TEAM, gkey) != snap1
+
+
+# === Phase 3a: the delta `_result` carries n_changes (interval threshold) ===
+# The interval scheduler reads n_changes for the early-send `change_threshold`
+# gate, so a DELTA result must expose the count of changed items; FULL and the
+# no-change/no-baseline paths report 0.
+def test_n_changes_helper_sums_all_buckets():
+    changes = {"new": [{}, {}], "removed": [{}], "moved": [], "due": [{}],
+               "overdue": [], "today": []}
+    assert digests._n_changes(changes) == 4
+
+
+def test_personal_delta_result_carries_n_changes(tmp_path):
+    store = Store(path=str(tmp_path / "s.db"))
+    engine = _RecordingEngine()
+    base = [_person_issue(1, "misha", due="2026-06-10"),
+            _person_issue(2, "misha", due="2026-06-11")]
+    digests.personal(engine, base, store, today=TUE, full=False, commit=True)  # learn baseline
+    # Two distinct changes: issue 1's due moves; issue 3 is new.
+    changed = [_person_issue(1, "misha", due="2026-06-03"),
+               _person_issue(2, "misha", due="2026-06-11"),
+               _person_issue(3, "misha", due="2026-06-12")]
+    r = digests.personal(engine, changed, store, today=TUE, full=False, commit=False)
+    assert r["sent"] == 1 and r["reason"] == "ok"
+    assert r["n_changes"] == 2                       # one 'due' move + one 'new'
+
+
+def test_team_delta_result_carries_n_changes(tmp_path):
+    store = Store(path=str(tmp_path / "s.db"))
+    engine = _RecordingEngine()
+    base = [_person_issue(1, "misha", due="2026-06-01")]
+    digests.team(engine, base, store, today=TUE, full=False, commit=True, room="!r")  # baseline
+    changed = [_person_issue(1, "misha", due="2026-06-03"),       # due moved
+               _person_issue(2, "misha", due="2026-06-04")]       # new issue
+    r = digests.team(engine, changed, store, today=TUE, full=False, commit=False, room="!r")
+    assert r["sent"] == 1 and r["n_changes"] == 2
+
+
+def test_full_and_no_change_report_zero_n_changes(tmp_path):
+    store = Store(path=str(tmp_path / "s.db"))
+    engine = _RecordingEngine()
+    issues = [_person_issue(1, "misha", due="2026-06-10")]
+    # Full overview -> n_changes 0.
+    full = digests.personal(engine, issues, store, today=TUE, full=True, commit=False)
+    assert full["n_changes"] == 0
+    # Delta with no baseline -> no_baseline, n_changes 0.
+    nb = digests.team(engine, issues, store, today=TUE, full=False, commit=False, room="!r")
+    assert nb["reason"] == "no_baseline" and nb["n_changes"] == 0

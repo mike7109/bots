@@ -56,7 +56,9 @@ def test_push_notice_modes(settings):
 
 # --- per-pass schedule ------------------------------------------------
 def test_pass_schedule_default(settings):
-    assert settings.pass_schedule("digest_full") == PASS_DEFAULTS["digest_full"]
+    # A calendar pass gets the registry defaults plus a normalised kind="daily"
+    # (Phase 3a tolerates old/missing kind so the scheduler can branch on it).
+    assert settings.pass_schedule("digest_full") == {**PASS_DEFAULTS["digest_full"], "kind": "daily"}
 
 
 def test_pass_schedule_override_merges_over_default(settings):
@@ -69,7 +71,42 @@ def test_pass_schedule_override_merges_over_default(settings):
 
 def test_pass_schedule_unknown_name_fallback(settings):
     assert settings.pass_schedule("nope") == {
-        "enabled": True, "days": [0, 1, 2, 3, 4], "time": "09:00"}
+        "enabled": True, "days": [0, 1, 2, 3, 4], "time": "09:00", "kind": "daily"}
+
+
+# --- Phase 3a: the delta digests carry an INTERVAL schedule ------------
+def test_pass_schedule_delta_passes_are_interval(settings):
+    # Both delta digests merge the interval fields (kind + cadence/threshold/floor)
+    # over their registry defaults; the field values match INTERVAL_DELTA_DEFAULTS.
+    for name in ("digest_delta", "team_delta"):
+        sched = settings.pass_schedule(name)
+        assert sched["kind"] == "interval"
+        assert sched["every_hours"] == 2.5
+        assert sched["floor_min"] == 20
+        assert sched["change_threshold"] == 5
+        assert sched["days"] == [0, 1, 2, 3, 4]
+
+
+def test_pass_schedule_calendar_passes_default_to_daily(settings):
+    # Every non-delta scheduled pass is kind="daily" (so the scheduler routes it
+    # down the calendar path).
+    for name in ("due", "overdue", "digest_full", "team_full", "triage", "stale", "metrics"):
+        assert settings.pass_schedule(name)["kind"] == "daily"
+
+
+def test_pass_schedule_tolerates_old_override_without_kind(settings):
+    # A pre-Phase-3a override row (no `kind`) on an interval pass must NOT demote
+    # it to daily: the registry default kind="interval" survives the merge.
+    settings.update_pass("digest_delta", {"days": [0, 1, 3], "time": "08:00"})
+    sched = settings.pass_schedule("digest_delta")
+    assert sched["kind"] == "interval"               # kept from registry default
+    assert sched["days"] == [0, 1, 3] and sched["time"] == "08:00"   # override applied
+
+
+def test_delta_quiet_after_full_default(settings):
+    assert settings.get_global()["delta_quiet_after_full_h"] == 3
+    settings.update_global({"delta_quiet_after_full_h": 0})
+    assert settings.get_global()["delta_quiet_after_full_h"] == 0
 
 
 # --- rule overrides ---------------------------------------------------

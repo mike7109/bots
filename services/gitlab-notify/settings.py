@@ -87,6 +87,10 @@ class Settings:
             "skip_weekends": d.get("skip_weekends", True),
             "holidays": list(d.get("holidays", [])),
             "holidays_auto": d.get("holidays_auto", False),
+            # Overlap guard (Phase 3a): after a *_full digest SENDS, suppress the
+            # intraday *_delta for this many hours so it doesn't restate what the
+            # full just showed (full reads, delta still owns the baseline). 0=off.
+            "delta_quiet_after_full_h": d.get("delta_quiet_after_full_h", 3),
         }
 
     # --- global ----------------------------------------------------------
@@ -226,8 +230,20 @@ class Settings:
 
     # --- per-pass schedule (days + time the scheduler fires each pass) ----
     def pass_schedule(self, name: str) -> dict:
+        """Effective schedule for a pass: registry defaults + admin overrides.
+
+        The scheduler branches on `kind`: "interval" (the delta digests — fired
+        every ~`every_hours` within the active window, or early on a burst of
+        `change_threshold` changes, throttled by `floor_min`) vs "daily"/calendar
+        (everything else). A missing/old `kind` defaults to "daily" so passes that
+        never carried the field — and any pre-Phase-3a override row — stay
+        calendar-scheduled with their existing days/time. `enabled`/`days`/`time`
+        plus any extra fields (days_idle, the interval fields) merge defaults
+        under admin overrides.
+        """
         base = dict(PASS_DEFAULTS.get(name, {"enabled": True, "days": WORKDAYS, "time": "09:00"}))
         base.update(self.store.get_state(_KIND, f"pass:{name}") or {})
+        base.setdefault("kind", "daily")              # tolerate old/missing kind
         return base
 
     def all_pass_schedules(self) -> dict:
