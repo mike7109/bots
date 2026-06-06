@@ -187,6 +187,14 @@ HTML = r"""<!doctype html>
       <div class="row"><span class="mut" style="width:150px">GitLab URL</span><input type="text" id="cGl" style="width:300px" placeholder="https://git.…"></div>
       <div class="row"><button class="primary" onclick="saveConn()">Сохранить адреса</button><span class="mut" style="font-size:12px">— homeserver и GitLab URL (секреты сохраняются своей кнопкой выше)</span></div>
     </div>
+    <div class="card"><h2>🔔 Пинок (issue-graph)</h2>
+      <p class="hint">issue-graph умеет «пнуть исполнителя» — отправить ему личное сообщение по задаче через бота. Здесь — токен этого канала и защита человека от спама.</p>
+      <div class="row"><span class="mut" style="width:150px">Токен пинка</span><span id="cPokeWrap"></span></div>
+      <p class="hint" style="margin:0 0 12px">issue-graph шлёт его в заголовке Authorization: Bearer; задай тот же токен там. Без токена эндпоинт выключен (fail-closed).</p>
+      <div class="mut" style="margin:8px 0 4px">Антиспам — защищает <b>конкретного человека</b> от лавины пинков (глобальный флуд всё равно ловит общий предохранитель):</div>
+      <div id="pokeFields"></div>
+      <div class="row"><button class="primary" onclick="savePoke()">Сохранить</button></div>
+    </div>
     <div class="card"><h2>Проверка конфигурации</h2>
       <p class="hint">Прогоняет всё: Matrix, секрет вебхука, GitLab URL, и каждую группу (доступ по токену + состоит ли бот в её комнате). Видно, что не настроено.</p>
       <div class="row"><button class="primary" onclick="runHealth()">✅ Проверить всё</button><span id="healthSum" style="font-size:13px"></span></div>

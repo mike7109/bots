@@ -200,11 +200,32 @@ function renderConn(c){c=c||{};
   $('cGl').value=c.gitlab_url||'';
   secretField('cTokWrap','cTok','matrix_token',c.has_matrix_token,c.matrix_token_masked,'syt_…',300);
   secretField('cWhWrap','cWh','webhook_secret',c.has_webhook_secret,c.webhook_secret_masked,'секрет вебхука',300);
+  // 🔔 Токен пинка — тот же чип-паттерн (масковка/«Заменить»/поле→/api/conn).
+  secretField('cPokeWrap','cPoke','poke_token',c.has_poke_token,c.poke_token_masked,'токен пинка',300);
+  renderPoke();
+}
+// 🔔 Антиспам пинка: число-инпуты, привязанные к S.poke (как renderGuard к S.guard).
+const POKE_FIELDS=[
+  {k:'cooldown_s',label:'Кулдаун на (человек+задача), сек'},
+  {k:'per_user_window_s',label:'Окно лимита на человека, сек'},
+  {k:'per_user_max',label:'Макс пинков на человека за окно'},
+];
+function renderPoke(){const p=(S&&S.poke)||{};
+  $('pokeFields').innerHTML=POKE_FIELDS.map(f=>
+    `<div class="row"><span class="mut" style="width:280px">${f.label}</span><input type="number" id="poke_${f.k}" min="0" value="${p[f.k]==null?'':p[f.k]}" style="width:90px"></div>`
+  ).join('');
+}
+async function savePoke(){
+  const v=k=>Math.max(0,parseInt(($('poke_'+k)||{}).value,10)||0);
+  await api('/poke-config','POST',{cooldown_s:v('cooldown_s'),
+    per_user_window_s:v('per_user_window_s'),per_user_max:v('per_user_max')});
+  toast('Сохранено');load();
 }
 async function saveConn(){
   const body={matrix_homeserver:$('cHs').value,gitlab_url:$('cGl').value};
   const tok=$('cTok'); if(tok&&tok.value) body.matrix_token=tok.value;   // только если введён новый
   const wh=$('cWh'); if(wh&&wh.value) body.webhook_secret=wh.value;
+  const pk=$('cPoke'); if(pk&&pk.value) body.poke_token=pk.value;   // только если введён новый
   await api('/conn','POST',body);
   toast('Подключения сохранены');load();
 }
