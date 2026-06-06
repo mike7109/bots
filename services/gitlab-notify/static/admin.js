@@ -421,6 +421,22 @@ function renderPasses(){
       <div class="pResult" style="margin-top:8px;font-size:13px"></div></div>`;
   }).join('');
 }
+// Кастомный 24-часовой пикуер времени: два тёмных <select> (часы 00..23,
+// минуты 00..59) — всегда HH:MM, не зависит от локали браузера (нативный
+// <input type=time> может показать 12ч AM/PM). value: "HH:MM" (деф. "09:00").
+function _timeOpts(n,sel){let o='';for(let i=0;i<n;i++){const v=String(i).padStart(2,'0');
+  o+=`<option value="${v}"${v===sel?' selected':''}>${v}</option>`;}return o;}
+function timePicker(value,cls){
+  const m=/^(\d{1,2}):(\d{1,2})$/.exec(value||'')||[];
+  const hh=String(parseInt(m[1],10)||0).padStart(2,'0');
+  const mm=String(parseInt(m[2],10)||0).padStart(2,'0');
+  return `<span class="timepick"><select class="${cls}-h">${_timeOpts(24,hh)}</select>`+
+    `<span class="tpsep">:</span><select class="${cls}-m">${_timeOpts(60,mm)}</select></span>`;
+}
+function readTimePicker(container,cls){
+  const h=container.querySelector('.'+cls+'-h'),m=container.querySelector('.'+cls+'-m');
+  return (h?h.value:'09')+':'+(m?m.value:'00');
+}
 // Schedule editor differs by pass kind. interval (digest_delta/team_delta): the
 // delta digests fire every N hours within the workday window, or sooner on a
 // burst of ≥change_threshold changes — so no «Время», but «Каждые … часов» and
@@ -437,7 +453,7 @@ function passSchedEditor(p,c){
       <p class="hint" style="margin:6px 0 0">Дельта уходит только когда есть изменения: каждые N часов в рабочие часы или раньше — при всплеске на ≥ N изменений.</p>`;
   }
   return `<div class="row" style="margin:0"><span class="mut">Дни:</span><div class="days pDays">${miniDays(c.days||[],'d')}</div>
-        <span class="mut" style="margin-left:8px">Время:</span><input type="time" class="pTime" value="${esc(c.time||'09:00')}">
+        <span class="mut" style="margin-left:8px">Время:</span>${timePicker(c.time||'09:00','pTime')}
         ${p==='stale'?`<span class="mut" style="margin-left:8px">Без активности:</span><input type="number" class="pIdle" min="1" value="${c.days_idle||14}" style="width:60px"><span class="mut">дн.</span>`:''}
         <span class="spacer"></span><button class="primary sm" onclick="savePass('${p}',this)">Сохранить</button></div>`;
 }
@@ -452,7 +468,7 @@ async function savePass(p,btn){
       change_threshold:Math.max(0,parseInt(card.querySelector('.pThresh').value,10)||0)};
   }else{
     body={enabled:card.querySelector('.pEn').checked,days,
-      time:card.querySelector('.pTime').value};
+      time:readTimePicker(card,'pTime')};
     const idle=card.querySelector('.pIdle');if(idle)body.days_idle=+idle.value;
   }
   await api('/pass/'+p,'POST',body);toast('Расписание «'+p+'» сохранено');
@@ -464,13 +480,15 @@ async function saveHolidays(){
 // 🕗 Часы активности — окно времени суток, вне которого плановые рассылки молчат.
 function renderActiveHours(a){a=a||{};
   $('ahOn').checked=a.enabled!==false;
-  $('ahFrom').value=a.from||'08:00';
-  $('ahUntil').value=a.until||'20:00';
+  // Подменяем нативные <input type=time id=ahFrom/ahUntil> на кастомные 24ч-пикеры
+  // (span с тем же id), чтобы saveActiveHours читал часы/минуты из <select>.
+  $('ahFrom').outerHTML=`<span id="ahFrom">${timePicker(a.from||'08:00','ahFrom')}</span>`;
+  $('ahUntil').outerHTML=`<span id="ahUntil">${timePicker(a.until||'20:00','ahUntil')}</span>`;
   $('ahWh').checked=!!a.webhooks_quiet;
 }
 async function saveActiveHours(){
-  const body={enabled:$('ahOn').checked,from:$('ahFrom').value,
-    until:$('ahUntil').value,webhooks_quiet:$('ahWh').checked};
+  const body={enabled:$('ahOn').checked,from:readTimePicker($('ahFrom'),'ahFrom'),
+    until:readTimePicker($('ahUntil'),'ahUntil'),webhooks_quiet:$('ahWh').checked};
   await api('/active-hours','POST',body);toast('Сохранено');load();
 }
 // 🔕 Тишина после полного дайджеста — глобальная пауза дельты после полной сводки.
