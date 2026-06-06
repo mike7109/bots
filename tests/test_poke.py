@@ -1,12 +1,11 @@
 """POST /api/poke — issue-graph asks the bot to DM-remind ("пнуть") an assignee.
 
-Drives the REAL route (app.poke) over a TestClient, but swaps app.ctx for a fake
-context: a fake Matrix (records get_or_create_dm + send_html, can raise), a real
-Identity / Settings / Store(tmp), and a real SendGuard whose `blocked()` we can
-force. The minimal app mounts only the /api/poke route, so importing app.py's
-heavy wiring is the only real dependency (kept off the network by a tmp STATE_DB
-set before import + the fake ctx). Lifespan (the scheduler) never starts because
-we don't enter the TestClient as a context manager.
+Calls the REAL handler (app.poke) directly — no TestClient/httpx, since CI installs
+a minimal env without httpx. Swaps app.ctx for a fake context: a fake Matrix
+(records get_or_create_dm + send_html, can raise), a real Identity / Settings /
+Store(tmp), and a real SendGuard whose `blocked()` we can force. Importing app.py
+runs its module-level build_context() once (kept off the network by a tmp STATE_DB
+set before import + the fake ctx swapped in per test).
 """
 from __future__ import annotations
 
@@ -18,8 +17,10 @@ import pytest
 # build_context() opens a Store). The fake ctx below uses its own tmp store anyway.
 os.environ.setdefault("STATE_DB", "/tmp/poke-import-state.db")
 
-from fastapi import FastAPI, Header, Request   # noqa: E402
-from fastapi.testclient import TestClient       # noqa: E402
+import asyncio                                  # noqa: E402
+import json as _jsonlib                          # noqa: E402
+
+from starlette.requests import Request           # noqa: E402
 
 from botkit.identity import Identity            # noqa: E402
 from botkit.notify.guard import SendGuard       # noqa: E402
@@ -94,16 +95,37 @@ def identity():
     return Identity(USERS)
 
 
+class _Resp:
+    """Minimal response shim (.status_code / .json()) over the handler's JSONResponse."""
+    def __init__(self, status_code, payload):
+        self.status_code = status_code
+        self._payload = payload
+
+    def json(self):
+        return self._payload
+
+
+class _DirectClient:
+    """Calls the real app.poke coroutine directly — no TestClient/httpx dependency.
+    Builds a starlette Request from the JSON body and passes Authorization straight
+    to the handler's arg (FastAPI's Header injection isn't involved when called raw)."""
+    def post(self, path, json=None, headers=None):
+        authorization = (headers or {}).get("Authorization", "")
+        body = _jsonlib.dumps(json if json is not None else {}).encode()
+
+        async def receive():
+            return {"type": "http.request", "body": body, "more_body": False}
+
+        req = Request({"type": "http", "method": "POST", "path": path,
+                       "headers": [], "query_string": b""}, receive)
+        resp = asyncio.run(app_module.poke(req, authorization=authorization))
+        return _Resp(resp.status_code, _jsonlib.loads(bytes(resp.body)))
+
+
 def _client(store, settings, identity, matrix, guard, monkeypatch):
-    """A minimal app exposing the real app.poke handler over a swapped ctx."""
+    """Swap app.ctx for the fake; return a direct (TestClient-free) caller."""
     monkeypatch.setattr(app_module, "ctx", FakeCtx(store, settings, identity, matrix, guard))
-    test_app = FastAPI()
-
-    @test_app.post("/api/poke")
-    async def poke(request: Request, authorization: str = Header(default="")):
-        return await app_module.poke(request, authorization=authorization)
-
-    return TestClient(test_app)
+    return _DirectClient()
 
 
 def _auth(token=TOKEN):
