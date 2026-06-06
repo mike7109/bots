@@ -28,6 +28,9 @@ CONN_FIELDS = {
     "matrix_token": "MATRIX_TOKEN",
     "webhook_secret": "WEBHOOK_SECRET",
     "gitlab_url": "GITLAB_URL",
+    # Shared secret the issue-graph service sends as `Authorization: Bearer <…>`
+    # to the public POST /api/poke endpoint. Fail-closed: empty -> poke disabled.
+    "poke_token": "POKE_TOKEN",
 }
 
 _GLOBAL_KEY = "global"
@@ -278,6 +281,40 @@ class Settings:
             cur["enabled"] = bool(patch["enabled"])
         self.store.set_state(_KIND, "alerts", cur)
         return self.get_alerts()
+
+    # --- poke anti-spam (the issue-graph "пнуть исполнителя" endpoint) ----
+    # Soft limits applied BEFORE sending (no guard.record on rejection), so a
+    # poke flood is throttled here without tripping the global breaker. Kept
+    # comfortably BELOW the guard's per-target cap (max_per_target=5/5min) so a
+    # legitimate poke can never be the message that trips the breaker:
+    #   per_user_max=4 per 600s window < max_per_target=5 per 300s.
+    POKE_DEFAULTS = {
+        "cooldown_s": 600,          # per (user, issue): don't re-poke within 10 min
+        "per_user_window_s": 600,   # rolling window for the per-user rate cap
+        "per_user_max": 4,          # max pokes to one person per window (< breaker)
+    }
+
+    def get_poke(self) -> dict:
+        stored = self.store.get_state(_KIND, "poke_cfg") or {}
+        out = {}
+        for k, default in self.POKE_DEFAULTS.items():
+            try:
+                out[k] = max(0, int(stored.get(k, default)))
+            except (ValueError, TypeError):
+                out[k] = default
+        return out
+
+    def update_poke(self, patch: dict) -> dict:
+        cur = self.store.get_state(_KIND, "poke_cfg") or {}
+        for k in self.POKE_DEFAULTS:
+            if k not in patch:
+                continue
+            try:
+                cur[k] = max(0, int(patch[k]))       # counts/seconds are non-negative
+            except (ValueError, TypeError):
+                pass                                  # ignore garbage, keep prior/default
+        self.store.set_state(_KIND, "poke_cfg", cur)
+        return self.get_poke()
 
     # --- send guard (rate-limit + circuit breaker) -----------------------
     # Thresholds for botkit's SendGuard. Defaults sit comfortably ABOVE any

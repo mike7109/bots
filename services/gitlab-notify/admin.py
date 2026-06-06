@@ -235,6 +235,7 @@ def create_admin_router(ctx) -> list[APIRouter]:
             "push_modes": list(PUSH_MODES),
             "stats": ctx.store.log_stats(7),
             "alerts": settings.get_alerts(),
+            "poke": settings.get_poke(),            # anti-spam cfg for /api/poke
             "breaker": settings.get_breaker(),      # SAFETY: tripped flag + reason
             "guard": settings.get_guard(),          # rate-limit/breaker thresholds
             "last_runs": last_runs,
@@ -242,6 +243,7 @@ def create_admin_router(ctx) -> list[APIRouter]:
                 "matrix_homeserver": c["matrix_homeserver"],
                 "matrix_token_masked": _mask(c["matrix_token"]), "has_matrix_token": bool(c["matrix_token"]),
                 "webhook_secret_masked": _mask(c["webhook_secret"]), "has_webhook_secret": bool(c["webhook_secret"]),
+                "poke_token_masked": _mask(c["poke_token"]), "has_poke_token": bool(c["poke_token"]),
                 "gitlab_url": c["gitlab_url"],
             })(settings.get_conn()),
             "gitlab_url": settings.conn_value("gitlab_url"),
@@ -287,6 +289,15 @@ def create_admin_router(ctx) -> list[APIRouter]:
             # Silently drop unknown logins — only configured users can be alerted.
             patch["engineers"] = [str(e) for e in body["engineers"] if str(e) in known]
         return settings.update_alerts(patch)
+
+    @router.post("/api/poke-config")
+    async def set_poke_config(request: Request):
+        """Update the poke anti-spam config ({cooldown_s, per_user_window_s,
+        per_user_max}). NB: this is the PROTECTED config route — the actual poke
+        SEND endpoint is the PUBLIC POST /api/poke in app.py. Returns the
+        effective config."""
+        body = await request.json()
+        return settings.update_poke(body if isinstance(body, dict) else {})
 
     @router.post("/api/breaker/reset")
     def breaker_reset():
@@ -527,7 +538,7 @@ def create_admin_router(ctx) -> list[APIRouter]:
     async def set_conn(request: Request):
         body = await request.json()
         patch = {}
-        for f in ("matrix_homeserver", "matrix_token", "webhook_secret", "gitlab_url"):
+        for f in ("matrix_homeserver", "matrix_token", "webhook_secret", "gitlab_url", "poke_token"):
             if f in body and not (isinstance(body[f], str) and body[f].startswith("…")):
                 patch[f] = body[f]                  # skip masked (unchanged) secrets
         settings.update_conn(patch)

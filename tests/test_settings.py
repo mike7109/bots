@@ -218,7 +218,49 @@ def test_is_active_now_bad_config_fails_open(settings, store):
 # --- connection settings + seed_conn ----------------------------------
 def test_get_conn_defaults_empty(settings):
     assert settings.get_conn() == {
-        "matrix_homeserver": "", "matrix_token": "", "webhook_secret": "", "gitlab_url": ""}
+        "matrix_homeserver": "", "matrix_token": "", "webhook_secret": "",
+        "gitlab_url": "", "poke_token": ""}
+
+
+def test_poke_token_is_a_conn_field(settings):
+    # masked/editable like webhook_secret via the conn machinery
+    settings.update_conn({"poke_token": "tok-123"})
+    assert settings.conn_value("poke_token") == "tok-123"
+    settings.update_conn({"poke_token": ""})         # cleared -> falls back to env
+    assert settings.conn_value("poke_token") == ""
+
+
+def test_poke_token_seeded_from_env(store, monkeypatch):
+    # seed pulls POKE_TOKEN from env once (env var -> CONN_FIELDS["poke_token"])
+    monkeypatch.setenv("POKE_TOKEN", "from-env")
+    s = Settings(store)
+    s.seed_conn()
+    assert s.conn_value("poke_token") == "from-env"
+
+
+# --- poke anti-spam config --------------------------------------------
+def test_poke_defaults(settings):
+    assert settings.get_poke() == {
+        "cooldown_s": 600, "per_user_window_s": 600, "per_user_max": 4}
+
+
+def test_poke_cap_stays_below_breaker_per_target(settings):
+    # A legit poke must never be the message that trips the global breaker.
+    assert settings.get_poke()["per_user_max"] < settings.get_guard()["max_per_target"]
+
+
+def test_poke_update_and_roundtrip(settings, store):
+    eff = settings.update_poke({"cooldown_s": 120, "per_user_max": 2})
+    assert eff["cooldown_s"] == 120 and eff["per_user_max"] == 2
+    assert eff["per_user_window_s"] == 600           # untouched -> default
+    assert Settings(store).get_poke()["cooldown_s"] == 120
+
+
+def test_poke_update_validates_ints(settings):
+    settings.update_poke({"cooldown_s": "oops", "per_user_max": -3})
+    p = settings.get_poke()
+    assert p["cooldown_s"] == 600                     # garbage ignored
+    assert p["per_user_max"] == 0                     # negative clamped to 0
 
 
 def test_update_conn_set_and_clear(settings):

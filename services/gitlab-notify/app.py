@@ -5,14 +5,19 @@ this file only verifies the webhook, normalizes the payload, and hands the
 event to the engine.
 """
 import asyncio
+import hmac
 import logging
 import pathlib
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Header, Request
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from markupsafe import escape
 
 from botkit.config import env
+from botkit.notify.render import _safe_url
 from botkit.webhook import verify_token
 from admin import create_admin_router
 from normalize import normalize
@@ -79,3 +84,95 @@ async def webhook(request: Request, x_gitlab_token: str = Header(default="")):
         return {"ignored": "тихие часы"}
     event.room = src.get("room")
     return ctx.engine.handle(event)
+
+
+def _poke_fail(reason: str, status: int, **extra) -> JSONResponse:
+    return JSONResponse({"ok": False, "reason": reason, **extra}, status_code=status)
+
+
+@app.post("/api/poke")
+async def poke(request: Request, authorization: str = Header(default="")):
+    """Public endpoint: issue-graph asks the bot to DM-remind ("пнуть") a GitLab
+    assignee about an issue. Fail-closed on the token; soft anti-spam BEFORE the
+    send (no guard.record so spam never trips the global breaker); the DM bypasses
+    mute and NEVER falls back to a shared room (a poke must reach the person only).
+
+    Contract (from issue-graph): POST /api/poke, header
+    `Authorization: Bearer <poke_token>`, JSON body
+    {gitlab_username, issue:{iid,title,web_url,project_path}, message?}.
+    """
+    # 1) Token (fail-closed, exactly like webhook_secret): no token configured ->
+    #    the feature is OFF; a configured token must match constant-time.
+    token = ctx.settings.conn_value("poke_token")
+    if not token:
+        return _poke_fail("пинок выключен — не задан токен (POKE_TOKEN)", 401)
+    bearer = authorization[7:] if authorization.startswith("Bearer ") else ""
+    if not bearer or not hmac.compare_digest(bearer, token):
+        return _poke_fail("неверный токен", 401)
+
+    # 2) Body.
+    try:
+        body = await request.json()
+    except Exception:                            # noqa: BLE001 — malformed JSON
+        body = {}
+    username = (body or {}).get("gitlab_username")
+    issue = (body or {}).get("issue")
+    if not username or not isinstance(issue, dict):
+        return _poke_fail("нужны gitlab_username и issue", 400)
+
+    # 3) Global kill switch.
+    if not ctx.settings.enabled():
+        return _poke_fail("бот выключен", 503)
+
+    # 4) Resolve recipient. The spec example uses reason="user_not_mapped"
+    #    literally; we keep that machine token and add a human `detail`.
+    mxid = ctx.identity.matrix_id(username)
+    if not mxid:
+        return _poke_fail("user_not_mapped", 422,
+                          detail=f"пользователь «{username}» не сопоставлен с Matrix")
+
+    store = ctx.store
+    cfg = ctx.settings.get_poke()
+    now = time.time()
+    iid = issue.get("iid")
+
+    # 5) Anti-spam — soft 429, NO send, NO guard.record (so a poke flood is
+    #    throttled here and can never trip the global breaker).
+    prev = store.get_state("poke", f"{username}:{iid}")
+    if prev and (now - float(prev.get("ts", 0))) < cfg["cooldown_s"]:
+        return _poke_fail("этого исполнителя уже пнули по этой задаче недавно — подождите", 429)
+    rate = store.get_state("poke_rate", username) or {"ts": []}
+    recent = [t for t in rate.get("ts", []) if (now - float(t)) < cfg["per_user_window_s"]]
+    if len(recent) >= cfg["per_user_max"]:
+        return _poke_fail("слишком часто пингуете этого человека — подождите", 429)
+
+    # 6) Breaker backstop: if it's already tripped, don't add to the flood.
+    if ctx.guard is not None and ctx.guard.blocked():
+        return _poke_fail("предохранитель сработал — отправка остановлена", 503)
+
+    # 7) Build the message. Issue title/url come from GitLab -> ESCAPE everything.
+    custom = (body.get("message") or "").strip() if isinstance(body.get("message"), str) else ""
+    if custom:
+        html = str(escape(custom)).replace("\n", "<br>")   # plain text, keep line breaks
+    else:
+        title = escape(issue.get("title") or "")
+        web_url = issue.get("web_url") or ""
+        html = (f"🔔 Тебя пнули по задаче <b>#{escape(iid)} {title}</b><br>"
+                f'<a href="{escape(_safe_url(web_url))}">{escape(web_url)}</a>')
+
+    # 8) Send the DM directly (bypass mute, no room fallback).
+    try:
+        dm = ctx.matrix.get_or_create_dm(mxid)
+        ctx.matrix.send_html(dm, html, mention_user_ids=[mxid], notice=False)
+    except Exception as e:                       # noqa: BLE001 — report the delivery error
+        store.log_event("poke", "poke", "dm", "error", f"{username}: {e}"[:200])
+        return _poke_fail(f"ошибка доставки: {e}", 502)
+
+    # 9) Success: count toward the breaker (a genuine flood across people still
+    #    trips it), record the cooldown + per-user rate, log, and return.
+    if ctx.guard is not None:
+        ctx.guard.record(f"dm:{mxid}", html)
+    store.set_state("poke", f"{username}:{iid}", {"ts": now})
+    store.set_state("poke_rate", username, {"ts": [*recent, now]})
+    store.log_event("poke", "poke", "dm", "sent", f"{username} <- #{iid} {issue.get('title') or ''}"[:200])
+    return JSONResponse({"ok": True, "delivered": True})
