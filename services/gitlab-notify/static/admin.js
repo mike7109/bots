@@ -401,7 +401,7 @@ function renderPasses(){
       <div class="passhead">
         <div class="passicon">${icon}</div>
         <div class="passtitle"><b>${esc(title)}</b><div class="passsub">${subtitle}</div></div>
-        <div class="passmeta">${trigBadge} ${destBadge}</div>
+        <div class="passmeta">${trigBadge} ${destBadge}${r&&!r.enabled?' <span class="badge ignored" title="Тип уведомления выключен — ничего не уходит, даже по расписанию. Включи в «⚙ Настроить» → «Тип включён».">выключен</span>':''}</div>
         ${headToggle}
       </div>
       <div class="passsum"><span class="sumlabel">${wh?'Триггер':'Когда'}:</span> ${passSummary(p,c,wh)}</div>

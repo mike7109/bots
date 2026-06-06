@@ -1,7 +1,12 @@
   :root{--bg:#0f1318;--panel:#161b22;--panel2:#1b212b;--line:#262d38;--fg:#e6edf3;
     --mut:#8b95a5;--accent:#fc6d26;--accent2:#7dc4ff;--ok:#3fb950;--warn:#d29922;--bad:#f85149;}
   *{box-sizing:border-box}
+  /* color-scheme:dark — нативные контролы (чекбоксы, скроллбары, выпадашки, пикеры)
+     рисуются в тёмной теме, а не светлыми дефолтными. */
+  html{color-scheme:dark}
   body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 'Inter','Segoe UI',system-ui,sans-serif}
+  /* Видимые нативные чекбоксы/радио (выбор инженеров, «Куда») — акцентные, в тон. */
+  input[type=checkbox],input[type=radio]{accent-color:var(--accent2);cursor:pointer}
   a{color:var(--accent2);text-decoration:none}
   .wrap{max-width:1080px;margin:0 auto;padding:18px}
   header{display:flex;align-items:center;gap:14px;margin-bottom:14px;flex-wrap:wrap}
