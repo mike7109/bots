@@ -73,6 +73,7 @@ async function load(){
   $('holAuto').checked=s.schedule.holidays_auto;
   $('holidays').value=(s.schedule.holidays||[]).join('\n');
   renderActiveHours(s.active_hours);
+  renderQuietAfterFull();
   renderRules();
   renderSources();
   renderConn(s.conn);
@@ -330,19 +331,41 @@ function renderPasses(){
       <p class="hint" style="margin:6px 0 12px">${esc(desc)}</p>
       <div class="bubble pEx hide" style="margin-bottom:10px"></div>
       <div class="pPreview" style="margin-bottom:10px"></div>
-      <div class="row" style="margin:0"><span class="mut">Дни:</span><div class="days pDays">${miniDays(c.days||[],'d')}</div>
-        <span class="mut" style="margin-left:8px">Время:</span><input type="time" class="pTime" value="${esc(c.time||'09:00')}">
-        ${p==='stale'?`<span class="mut" style="margin-left:8px">Без активности:</span><input type="number" class="pIdle" min="1" value="${c.days_idle||14}" style="width:60px"><span class="mut">дн.</span>`:''}
-        <span class="spacer"></span><button class="primary sm" onclick="savePass('${p}',this)">Сохранить</button></div>
+      ${passSchedEditor(p,c)}
       <div class="pResult" style="margin-top:8px;font-size:13px"></div></div>`;
   }).join('');
 }
+// Schedule editor differs by pass kind. interval (digest_delta/team_delta): the
+// delta digests fire every N hours within the workday window, or sooner on a
+// burst of ≥change_threshold changes — so no «Время», but «Каждые … часов» and
+// «Слать раньше при ≥ … изменениях». daily/calendar: the classic days+time row.
+function passSchedEditor(p,c){
+  if(c.kind==='interval'){
+    return `<div class="row" style="margin:0"><span class="mut">Рабочие дни:</span><div class="days pDays">${miniDays(c.days||[],'d')}</div>
+        <span class="mut" style="margin-left:8px">Каждые:</span><input type="number" class="pEvery" step="0.5" min="0.5" value="${c.every_hours==null?2:c.every_hours}" style="width:64px"><span class="mut">ч</span>
+        <span class="mut" style="margin-left:8px">Слать раньше при ≥</span><input type="number" class="pThresh" min="0" value="${c.change_threshold==null?5:c.change_threshold}" style="width:60px"><span class="mut">изменениях</span>
+        <span class="spacer"></span><button class="primary sm" onclick="savePass('${p}',this)">Сохранить</button></div>
+      <p class="hint" style="margin:6px 0 0">Дельта уходит только когда есть изменения: каждые N часов в рабочие часы или раньше — при всплеске на ≥ N изменений.</p>`;
+  }
+  return `<div class="row" style="margin:0"><span class="mut">Дни:</span><div class="days pDays">${miniDays(c.days||[],'d')}</div>
+        <span class="mut" style="margin-left:8px">Время:</span><input type="time" class="pTime" value="${esc(c.time||'09:00')}">
+        ${p==='stale'?`<span class="mut" style="margin-left:8px">Без активности:</span><input type="number" class="pIdle" min="1" value="${c.days_idle||14}" style="width:60px"><span class="mut">дн.</span>`:''}
+        <span class="spacer"></span><button class="primary sm" onclick="savePass('${p}',this)">Сохранить</button></div>`;
+}
 async function savePass(p,btn){
   const card=btn.closest('.card');
-  const body={enabled:card.querySelector('.pEn').checked,
-    days:[...card.querySelectorAll('.pDays .day.sel')].map(e=>+e.dataset.d),
-    time:card.querySelector('.pTime').value};
-  const idle=card.querySelector('.pIdle');if(idle)body.days_idle=+idle.value;
+  const kind=(S.pass_schedules[p]||{}).kind;
+  const days=[...card.querySelectorAll('.pDays .day.sel')].map(e=>+e.dataset.d);
+  let body;
+  if(kind==='interval'){
+    body={enabled:card.querySelector('.pEn').checked,days,
+      every_hours:parseFloat(card.querySelector('.pEvery').value)||2,
+      change_threshold:Math.max(0,parseInt(card.querySelector('.pThresh').value,10)||0)};
+  }else{
+    body={enabled:card.querySelector('.pEn').checked,days,
+      time:card.querySelector('.pTime').value};
+    const idle=card.querySelector('.pIdle');if(idle)body.days_idle=+idle.value;
+  }
   await api('/pass/'+p,'POST',body);toast('Расписание «'+p+'» сохранено');
 }
 async function saveHolidays(){
@@ -360,6 +383,15 @@ async function saveActiveHours(){
   const body={enabled:$('ahOn').checked,from:$('ahFrom').value,
     until:$('ahUntil').value,webhooks_quiet:$('ahWh').checked};
   await api('/active-hours','POST',body);toast('Сохранено');load();
+}
+// 🔕 Тишина после полного дайджеста — глобальная пауза дельты после полной сводки.
+function renderQuietAfterFull(){
+  const v=(S&&S.schedule&&S.schedule.delta_quiet_after_full_h);
+  $('quietAfterFull').value=v==null?3:v;
+}
+async function saveQuietAfterFull(){
+  const v=Math.max(0,parseFloat($('quietAfterFull').value)||0);
+  await api('/global','POST',{delta_quiet_after_full_h:v});toast('Сохранено');load();
 }
 async function passExample(tpl,btn){
   const box=btn.closest('.card').querySelector('.pEx');

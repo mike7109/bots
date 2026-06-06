@@ -214,6 +214,7 @@ def create_admin_router(ctx) -> list[APIRouter]:
                 "skip_weekends": g["skip_weekends"],
                 "holidays": g["holidays"],
                 "holidays_auto": g.get("holidays_auto", False),
+                "delta_quiet_after_full_h": g.get("delta_quiet_after_full_h", 3),
             },
             "pass_schedules": settings.all_pass_schedules(),
             "active_hours": settings.get_active_hours(),
