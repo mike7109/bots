@@ -1,5 +1,5 @@
 const DAYS=["Пн","Вт","Ср","Чт","Пт","Сб","Вс"];
-const TABS=[["dash","Дашборд"],["src","Группы"],["users","Получатели"],["sched","Рассылки"],["cal","Календарь"],["rules","Правила"],["tpl","Шаблоны"],["logs","Логи"],["conn","Настройки"]];
+const TABS=[["dash","Дашборд"],["src","Группы"],["users","Получатели"],["sched","Рассылки"],["cal","Календарь"],["tpl","Шаблоны"],["logs","Логи"],["conn","Настройки"]];
 // Pass cards are driven by the backend registry (S.registry); the only thing the
 // registry doesn't carry is an icon, so we keep a small map keyed by pass name
 // with a category fallback (group→🗓, personal→📋) and a default •.
@@ -80,7 +80,6 @@ async function load(){
   $('holidays').value=(s.schedule.holidays||[]).join('\n');
   renderActiveHours(s.active_hours);
   renderQuietAfterFull();
-  renderRules();
   renderSources();
   renderConn(s.conn);
   checkConfig();
@@ -284,24 +283,6 @@ async function saveSrc(btn){
 }
 async function deleteSrc(id,btn){if(!confirm('Удалить группу «'+id+'»? Бот перестанет её слушать.'))return;
   await api('/sources/'+encodeURIComponent(id),'DELETE');toast('Группа удалена');load();}
-function renderRules(){
-  $('rules').innerHTML=S.rules.map(r=>`<div class="card" style="padding:14px">
-    <div class="row" style="margin:0"><div style="font-size:15px"><b>${esc(kindTitle(r.event))}</b> <span class="mut mono" style="font-size:11px">${esc(r.event)}</span>${r.enabled?'':' <span class="badge ignored">выключено</span>'}</div>
-      <span class="spacer"></span>
-      <label class="row" style="margin:0;gap:6px"><span class="mut" style="font-size:12px">вкл</span><span class="switch"><input type="checkbox" ${r.enabled?'checked':''} onchange="setRule('${r.event}',{enabled:this.checked})"><span class="slider"></span></span></label></div>
-    <p class="hint" style="margin:6px 0 10px">${esc(kindDesc(r.event))}</p>
-    <div class="row" style="margin:0"><span class="mut">Куда слать:</span>
-      ${['room','dm'].map(d=>`<label class="tag" style="cursor:pointer;padding:3px 9px"><input type="checkbox" ${r.to.includes(d)?'checked':''} onchange="toggleDest('${r.event}','${d}',this.checked)"> ${DEST[d]}</label>`).join('')}
-      <span class="spacer"></span><button class="sm" onclick="toggleExample('${r.event}','${r.template}',this)">👁 пример</button></div>
-    <div class="bubble exmpl hide" id="ex_${r.event}" style="margin-top:10px"></div></div>`).join('');
-}
-async function toggleExample(ev,tpl,btn){
-  const box=$('ex_'+ev);
-  if(!box.classList.contains('hide')){box.classList.add('hide');return;}
-  box.classList.remove('hide');box.innerHTML='<span class="mut">загрузка…</span>';
-  const r=await api('/example?template='+encodeURIComponent(tpl));
-  box.innerHTML=r.ok?r.html:'<span class="err">'+esc(r.error||'ошибка')+'</span>';
-}
 $('killSwitch').addEventListener('change',async e=>{await api('/global','POST',{enabled:e.target.checked});toast(e.target.checked?'Бот включён':'Бот выключен');load();});
 async function setUser(login,patch){await api('/user/'+login,'POST',patch);toast('Сохранено: '+login);}
 async function inviteBlast(btn){
@@ -318,22 +299,48 @@ function miniDays(sel,prefix){return DAYS.map((d,i)=>`<span class="day ${sel.inc
 // Category of a pass (registry-driven), with a safe default for the rare case a
 // pass has no registry entry.
 function passCat(p){return (REG[p]||{}).category||'group';}
-// Sub-tabs are built from the categories actually present among S.passes: «Все»
-// first, then CAT_ORDER, then any extra categories appended in first-seen order.
+// The unified «Рассылки» list is ONE registry-driven list: the scheduled passes
+// (S.passes) PLUS every webhook-triggered registry entry (e.g. `issue`). Both are
+// just registry passes; the card adapts (webhook cards have no schedule/run).
+function isWebhook(p){return (REG[p]||{}).trigger==='webhook';}
+function allCards(){
+  const webhook=(S.registry||[]).filter(p=>p.trigger==='webhook').map(p=>p.name);
+  return S.passes.concat(webhook.filter(p=>!S.passes.includes(p)));
+}
+// Sub-tabs are built from the categories actually present across the unified list:
+// «Все» first, then CAT_ORDER, then any extra categories appended in first-seen
+// order. Counts span scheduled + webhook cards alike.
 function renderPassSubtabs(){
   const box=$('passSubtabs');if(!box)return;
-  const cnt={};S.passes.forEach(p=>{const c=passCat(p);cnt[c]=(cnt[c]||0)+1;});
+  const cards=allCards();
+  const cnt={};cards.forEach(p=>{const c=passCat(p);cnt[c]=(cnt[c]||0)+1;});
   const present=Object.keys(cnt);
   const ordered=CAT_ORDER.filter(c=>present.includes(c))
     .concat(present.filter(c=>!CAT_ORDER.includes(c)));
-  const total=S.passes.length;
+  const total=cards.length;
   const pill=(cat,label,n)=>`<span class="subtab ${PASSCAT===cat?'sel':''}" onclick="PASSCAT='${cat}';renderPassSubtabs();renderPasses()">${esc(label)}<span class="cnt">${n}</span></span>`;
   box.innerHTML=pill('all','Все',total)
     +ordered.map(c=>pill(c,CAT_LABEL[c]||c,cnt[c])).join('');
 }
+// Destination editor + type-enable, driven by the RULE for this card's
+// event_kind (matched in S.rules by `event`). Lets you set «Куда» (room/dm via
+// toggleDest→setRule) and the notification-type on/off (enabled via setRule).
+// digest_full & digest_delta share one event_kind → editing either reflects on
+// both after reload (we show a hint for those).
+function ruleBlock(ek,shared){
+  const r=(S.rules||[]).find(x=>x.event===ek);
+  if(!r)return '';
+  const dests=['room','dm'].map(d=>`<label class="tag" style="cursor:pointer;padding:3px 9px"><input type="checkbox" ${r.to.includes(d)?'checked':''} onchange="toggleDest('${ek}','${d}',this.checked)"> ${DEST[d]}</label>`).join('');
+  const hint=shared?`<p class="hint" style="margin:6px 0 0">«Полный» и «изменения» — один тип уведомления: «Тип включён» и «Куда» общие для обеих рассылок.</p>`:'';
+  return `<div class="rulebox">
+    <div class="row" style="margin:0">
+      <label class="row" style="margin:0;gap:6px" title="Включить/выключить весь этот тип уведомления (общий выключатель типа)"><span class="mut" style="font-size:12px">Тип включён</span><span class="switch"><input type="checkbox" ${r.enabled?'checked':''} onchange="setRule('${ek}',{enabled:this.checked})"><span class="slider"></span></span></label>
+      ${r.enabled?'':'<span class="badge ignored">тип выключен</span>'}
+      <span class="mut" style="margin-left:10px">Куда:</span>${dests}</div>${hint}</div>`;
+}
 function renderPasses(){
   renderPassSubtabs();
-  const passes=S.passes.filter(p=>PASSCAT==='all'||passCat(p)===PASSCAT);
+  const passes=allCards().filter(p=>PASSCAT==='all'||passCat(p)===PASSCAT);
   if(!passes.length){$('passCards').innerHTML='<p class="hint" style="margin:8px 0">Здесь пока пусто.</p>';return;}
   $('passCards').innerHTML=passes.map(p=>{
     const c=S.pass_schedules[p]||{};
@@ -341,25 +348,38 @@ function renderPasses(){
     // (the «✎ шаблон» / «👁 Пример» target) — digest_full & digest_delta share it.
     const meta=REG[p]||{};
     const title=meta.title||p, desc=meta.description||'', tpl=meta.event_kind||p;
+    const ek=meta.event_kind||p;
     const icon=passIcon(p,meta);
+    const wh=isWebhook(p);
     // Destination badge (self-describing card): dm → «Личка», else «Комната».
     const dm=(meta.to||[]).includes('dm');
     const destBadge=`<span class="tag" title="Куда уходит рассылка">${dm?'→ Личка':'→ Комната'}</span>`;
-    // Every pass is single-mode now (Phase 2a split the anchor-dual digests into
-    // separate full/delta passes) → one «Запустить сейчас» button, no mode arg.
+    // Trigger badge: webhook («🔔 вебхук») fires in real time on a GitLab event;
+    // scheduled («⏱ расписание») fires by days/time or interval below.
+    const trigBadge=wh
+      ? `<span class="tag" title="Срабатывает в реальном времени по событию GitLab">🔔 вебхук</span>`
+      : `<span class="tag" title="Идёт по расписанию (дни/время или интервал)">⏱ расписание</span>`;
+    // Webhook cards (e.g. issue) have NO schedule editor and NO «Запустить сейчас»
+    // (there's nothing to schedule/trigger — they fire on the GitLab event); they
+    // still expose «Пример»/«шаблон» + the type-enable + destination editor.
+    // Scheduled cards: single-mode (Phase 2a) → one «Запустить сейчас», no mode.
+    const runBtns=wh?'':`<button class="sm" onclick="previewPass('${p}',this)">🔍 Предпросмотр</button>
+        <span class="sendsep" title="ниже — реальная отправка"></span>
+        <button class="primary sm" onclick="send('${p}',this)">▶ Запустить сейчас</button>`;
+    // Flag cards that SHARE an event_kind/rule with another card (digest_full ↔
+    // digest_delta, team_full ↔ team_delta): the type-enable/«Куда» are common.
+    const shared=allCards().filter(q=>(REG[q]||{}).event_kind===ek).length>1;
     return `<div class="card" data-p="${p}">
-      <div class="row" style="margin:0"><div style="font-size:15px"><b>${icon} ${esc(title)}</b> ${destBadge} <span class="mut mono" style="font-size:11px">${esc(p)}</span></div>
+      <div class="row" style="margin:0"><div style="font-size:15px"><b>${icon} ${esc(title)}</b> ${destBadge} ${trigBadge} <span class="mut mono" style="font-size:11px">${esc(p)}</span></div>
         <span class="spacer"></span>
-        <label class="row" style="margin:0;gap:6px"><span class="mut" style="font-size:12px">вкл</span><span class="switch"><input type="checkbox" class="pEn" ${c.enabled?'checked':''}><span class="slider"></span></span></label>
         <button class="sm" onclick="passExample('${esc(tpl)}',this)">👁 Пример</button>
         <button class="sm" onclick="editTpl('${esc(tpl)}')">✎ шаблон</button>
-        <button class="sm" onclick="previewPass('${p}',this)">🔍 Предпросмотр</button>
-        <span class="sendsep" title="ниже — реальная отправка"></span>
-        <button class="primary sm" onclick="send('${p}',this)">▶ Запустить сейчас</button></div>
+        ${runBtns}</div>
       <p class="hint" style="margin:6px 0 12px">${esc(desc)}</p>
-      <div class="bubble pEx hide" style="margin-bottom:10px"></div>
+      ${ruleBlock(ek,shared)}
+      <div class="bubble pEx hide" style="margin:10px 0"></div>
       <div class="pPreview" style="margin-bottom:10px"></div>
-      ${passSchedEditor(p,c)}
+      ${wh?'':passSchedEditor(p,c)}
       <div class="pResult" style="margin-top:8px;font-size:13px"></div></div>`;
   }).join('');
 }
@@ -368,14 +388,17 @@ function renderPasses(){
 // burst of ≥change_threshold changes — so no «Время», but «Каждые … часов» and
 // «Слать раньше при ≥ … изменениях». daily/calendar: the classic days+time row.
 function passSchedEditor(p,c){
+  // The «вкл» toggle gates the SCHEDULE (planner auto-send), separate from the
+  // notification-type on/off in ruleBlock above.
+  const schedOn=`<label class="row" style="margin:0;gap:6px" title="Слать эту рассылку по расписанию (планировщик)"><span class="mut" style="font-size:12px">Расписание вкл</span><span class="switch"><input type="checkbox" class="pEn" ${c.enabled?'checked':''}><span class="slider"></span></span></label>`;
   if(c.kind==='interval'){
-    return `<div class="row" style="margin:0"><span class="mut">Рабочие дни:</span><div class="days pDays">${miniDays(c.days||[],'d')}</div>
+    return `<div class="row" style="margin:0">${schedOn}<span class="mut" style="margin-left:8px">Рабочие дни:</span><div class="days pDays">${miniDays(c.days||[],'d')}</div>
         <span class="mut" style="margin-left:8px">Каждые:</span><input type="number" class="pEvery" step="0.5" min="0.5" value="${c.every_hours==null?2:c.every_hours}" style="width:64px"><span class="mut">ч</span>
         <span class="mut" style="margin-left:8px">Слать раньше при ≥</span><input type="number" class="pThresh" min="0" value="${c.change_threshold==null?5:c.change_threshold}" style="width:60px"><span class="mut">изменениях</span>
         <span class="spacer"></span><button class="primary sm" onclick="savePass('${p}',this)">Сохранить</button></div>
       <p class="hint" style="margin:6px 0 0">Дельта уходит только когда есть изменения: каждые N часов в рабочие часы или раньше — при всплеске на ≥ N изменений.</p>`;
   }
-  return `<div class="row" style="margin:0"><span class="mut">Дни:</span><div class="days pDays">${miniDays(c.days||[],'d')}</div>
+  return `<div class="row" style="margin:0">${schedOn}<span class="mut" style="margin-left:8px">Дни:</span><div class="days pDays">${miniDays(c.days||[],'d')}</div>
         <span class="mut" style="margin-left:8px">Время:</span><input type="time" class="pTime" value="${esc(c.time||'09:00')}">
         ${p==='stale'?`<span class="mut" style="margin-left:8px">Без активности:</span><input type="number" class="pIdle" min="1" value="${c.days_idle||14}" style="width:60px"><span class="mut">дн.</span>`:''}
         <span class="spacer"></span><button class="primary sm" onclick="savePass('${p}',this)">Сохранить</button></div>`;

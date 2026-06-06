@@ -54,6 +54,8 @@
   .stat .l{font-size:11px;color:var(--mut);text-transform:uppercase}
   .stat.bad .n{color:var(--bad)} .stat.ok .n{color:var(--ok)}
   .tag{font-size:11px;padding:1px 7px;border-radius:6px;background:var(--panel2);border:1px solid var(--line);color:var(--mut);margin-right:4px}
+  /* Per-card rule editor (type-enable + destination) inside a pass card. */
+  .rulebox{margin:0 0 10px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel2)}
   .toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--panel2);border:1px solid var(--line);padding:10px 16px;border-radius:9px;opacity:0;transition:.2s;pointer-events:none;z-index:50}
   .toast.show{opacity:1}
   .login{max-width:340px;margin:14vh auto;text-align:center}
