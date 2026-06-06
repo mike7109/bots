@@ -331,12 +331,9 @@ function ruleBlock(ek,shared){
   const r=(S.rules||[]).find(x=>x.event===ek);
   if(!r)return '';
   const dests=['room','dm'].map(d=>`<label class="tag" style="cursor:pointer;padding:3px 9px"><input type="checkbox" ${r.to.includes(d)?'checked':''} onchange="toggleDest('${ek}','${d}',this.checked)"> ${DEST[d]}</label>`).join('');
-  const hint=shared?`<p class="hint" style="margin:6px 0 0">«Полный» и «изменения» — один тип уведомления: «Тип включён» и «Куда» общие для обеих рассылок.</p>`:'';
+  const hint=shared?`<p class="hint" style="margin:6px 0 0">«Полный» и «изменения» — один тип уведомления: адрес «Куда» общий для обеих рассылок.</p>`:'';
   return `<div class="rulebox">
-    <div class="row" style="margin:0">
-      <label class="row" style="margin:0;gap:6px" title="Включить/выключить весь этот тип уведомления (общий выключатель типа)"><span class="mut" style="font-size:12px">Тип включён</span><span class="switch"><input type="checkbox" ${r.enabled?'checked':''} onchange="setRule('${ek}',{enabled:this.checked})"><span class="slider"></span></span></label>
-      ${r.enabled?'':'<span class="badge ignored">тип выключен</span>'}
-      <span class="mut" style="margin-left:10px">Куда:</span>${dests}</div>${hint}</div>`;
+    <div class="row" style="margin:0"><span class="mut">Куда:</span>${dests}</div>${hint}</div>`;
 }
 // Human one-liner summary of WHEN/HOW a card fires (read-only, always visible).
 // Calendar: «Пн–Пт · 09:00»; interval: «каждые N ч · при ≥M изм.»; webhook: event.
@@ -377,14 +374,14 @@ function renderPasses(){
     const trigBadge=wh
       ? `<span class="tag" title="Срабатывает в реальном времени по событию GitLab">🔔 вебхук</span>`
       : `<span class="tag" title="Идёт по расписанию (дни/время или интервал)">⏱ расписание</span>`;
-    // Header enable toggle. Scheduled: the SCHEDULE on/off (.pEn — moved here from
-    // the schedule row). Webhook: there's no schedule, so the header toggle is the
-    // notification-type on/off (the rule.enabled, via setRule) — .pEn is omitted on
-    // webhook cards (savePass is never called for them).
+    // ЕДИНЫЙ выключатель уведомления в шапке. active = «реально ли уходит»:
+    // для расписания — тип включён И расписание включено; для вебхука — тип включён.
     const r=(S.rules||[]).find(x=>x.event===ek);
+    const ruleOn=r?r.enabled:true, schedOn=c.enabled!==false;
+    const active=wh?(r?r.enabled:false):(schedOn&&ruleOn);
     const headToggle=wh
-      ? (r?`<label class="switch" title="Включить/выключить весь этот тип уведомления"><input type="checkbox" ${r.enabled?'checked':''} onchange="setRule('${ek}',{enabled:this.checked})"><span class="slider"></span></label>`:'')
-      : `<label class="switch" title="Слать эту рассылку по расписанию (планировщик)"><input type="checkbox" class="pEn" ${c.enabled?'checked':''} onchange="savePass('${p}',this)"><span class="slider"></span></label>`;
+      ? (r?`<label class="switch" title="Включить/выключить это уведомление"><input type="checkbox" ${active?'checked':''} onchange="setRule('${ek}',{enabled:this.checked})"><span class="slider"></span></label>`:'')
+      : `<label class="switch" title="Включить/выключить это уведомление (тип + расписание)"><input type="checkbox" ${active?'checked':''} onchange="toggleNotif('${p}','${ek}',this)"><span class="slider"></span></label>`;
     // Webhook cards (e.g. issue) have NO schedule editor and NO «Запустить сейчас»
     // (there's nothing to schedule/trigger — they fire on the GitLab event); they
     // still expose «Пример»/«шаблон» + the type-enable + destination editor.
@@ -401,7 +398,7 @@ function renderPasses(){
       <div class="passhead">
         <div class="passicon">${icon}</div>
         <div class="passtitle"><b>${esc(title)}</b><div class="passsub">${subtitle}</div></div>
-        <div class="passmeta">${trigBadge} ${destBadge}${r&&!r.enabled?' <span class="badge ignored" title="Тип уведомления выключен — ничего не уходит, даже по расписанию. Включи в «⚙ Настроить» → «Тип включён».">выключен</span>':''}</div>
+        <div class="passmeta">${trigBadge} ${destBadge}${!active?' <span class="badge ignored" title="Выключено — ничего не уходит">выключено</span>':''}</div>
         ${headToggle}
       </div>
       <div class="passsum"><span class="sumlabel">${wh?'Триггер':'Когда'}:</span> ${passSummary(p,c,wh)}</div>
@@ -442,9 +439,9 @@ function readTimePicker(container,cls){
 // burst of ≥change_threshold changes — so no «Время», but «Каждые … часов» and
 // «Слать раньше при ≥ … изменениях». daily/calendar: the classic days+time row.
 function passSchedEditor(p,c){
-  // The schedule on/off (.pEn) lives in the card header now; this editor holds the
-  // days/time (or interval) fields + Save. The .pEn checkbox is read by savePass
-  // from the card root, so it doesn't matter that it sits outside this block.
+  // The on/off is the single header toggle (toggleNotif); this editor holds only the
+  // schedule fields (days/time or interval) + Save. savePass posts those without
+  // `enabled` (a merge-patch), so toggling on/off never disturbs days/time.
   if(c.kind==='interval'){
     return `<div class="row" style="margin:0"><span class="mut">Рабочие дни:</span><div class="days pDays">${miniDays(c.days||[],'d')}</div>
         <span class="mut" style="margin-left:8px">Каждые:</span><input type="number" class="pEvery" step="0.5" min="0.5" value="${c.every_hours==null?2:c.every_hours}" style="width:64px"><span class="mut">ч</span>
@@ -462,16 +459,24 @@ async function savePass(p,btn){
   const kind=(S.pass_schedules[p]||{}).kind;
   const days=[...card.querySelectorAll('.pDays .day.sel')].map(e=>+e.dataset.d);
   let body;
+  // Только поля расписания — вкл/выкл уведомления делает единый тумблер в шапке
+  // (toggleNotif). update_pass — merge, так что enabled не затирается.
   if(kind==='interval'){
-    body={enabled:card.querySelector('.pEn').checked,days,
-      every_hours:parseFloat(card.querySelector('.pEvery').value)||2,
+    body={days,every_hours:parseFloat(card.querySelector('.pEvery').value)||2,
       change_threshold:Math.max(0,parseInt(card.querySelector('.pThresh').value,10)||0)};
   }else{
-    body={enabled:card.querySelector('.pEn').checked,days,
-      time:readTimePicker(card,'pTime')};
+    body={days,time:readTimePicker(card,'pTime')};
     const idle=card.querySelector('.pIdle');if(idle)body.days_idle=+idle.value;
   }
   await api('/pass/'+p,'POST',body);toast('Расписание «'+p+'» сохранено');
+}
+// Единый выключатель уведомления: ставит И тип (правило), И расписание в одно
+// состояние. Merge-патчи не трогают дни/время/адрес — только enabled.
+async function toggleNotif(p,ek,el){
+  const on=el.checked;
+  await api('/pass/'+p,'POST',{enabled:on});
+  if(ek)await api('/rule/'+ek,'POST',{enabled:on});
+  toast(on?'Включено':'Выключено');load();
 }
 async function saveHolidays(){
   const holidays=$('holidays').value.split('\n').map(s=>s.trim()).filter(Boolean);
