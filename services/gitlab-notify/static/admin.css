@@ -42,6 +42,11 @@
   .days{display:flex;gap:6px;flex-wrap:wrap}
   .day{padding:6px 10px;border:1px solid var(--line);border-radius:7px;cursor:pointer;user-select:none;font-size:13px}
   .day.sel{background:var(--accent2);color:#0b0f14;border-color:var(--accent2);font-weight:600}
+  .subtabs{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 14px}
+  .subtab{padding:7px 14px;border:1px solid var(--line);border-radius:20px;cursor:pointer;user-select:none;font-size:13px;font-weight:600;color:var(--mut);background:var(--panel2)}
+  .subtab:hover{color:var(--fg)}
+  .subtab.sel{background:var(--accent);color:#fff;border-color:var(--accent)}
+  .subtab .cnt{font-size:11px;opacity:.7;margin-left:5px;font-weight:500}
   .row{display:flex;align-items:center;gap:10px;margin:10px 0;flex-wrap:wrap}
   .triggers{display:flex;gap:8px;flex-wrap:wrap}
   .stat{display:inline-block;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:10px 16px;margin:0 8px 8px 0}

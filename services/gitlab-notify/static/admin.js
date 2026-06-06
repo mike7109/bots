@@ -25,6 +25,12 @@ const KIND={
   metrics:{t:'Метрики потока',d:'Еженедельный снимок метрик → в общую комнату.'},
 };
 const DEST={room:'Комната',dm:'Личка'};
+// «Рассылки» group cards by registry `category`. Stable order + friendly RU
+// labels; unknown categories appended (label = the raw code) so new ones still
+// show up. PASSCAT is the selected sub-tab ('all' = no filter, the default).
+const CAT_ORDER=['group','personal'];
+const CAT_LABEL={group:'Групповые (в комнату)',personal:'Личные (в ЛС)'};
+let PASSCAT='all';
 const PUSHL={default:'Как задумано',loud:'Всегда пуш',quiet:'Тихо (без пуша)'};
 function kindTitle(k){return (KIND[k]||{}).t||k;}
 function kindDesc(k){return (KIND[k]||{}).d||'';}
@@ -309,18 +315,40 @@ async function inviteBlast(btn){
 async function setRule(ev,patch){await api('/rule/'+ev,'POST',patch);toast('Правило: '+ev);load();}
 function toggleDest(ev,d,on){const r=S.rules.find(x=>x.event===ev);let to=r.to.slice();if(on){if(!to.includes(d))to.push(d);}else{to=to.filter(x=>x!==d);}setRule(ev,{to});}
 function miniDays(sel,prefix){return DAYS.map((d,i)=>`<span class="day ${sel.includes(i)?'sel':''}" style="padding:3px 7px;font-size:12px" data-${prefix}="${i}" onclick="this.classList.toggle('sel')">${d}</span>`).join('');}
+// Category of a pass (registry-driven), with a safe default for the rare case a
+// pass has no registry entry.
+function passCat(p){return (REG[p]||{}).category||'group';}
+// Sub-tabs are built from the categories actually present among S.passes: «Все»
+// first, then CAT_ORDER, then any extra categories appended in first-seen order.
+function renderPassSubtabs(){
+  const box=$('passSubtabs');if(!box)return;
+  const cnt={};S.passes.forEach(p=>{const c=passCat(p);cnt[c]=(cnt[c]||0)+1;});
+  const present=Object.keys(cnt);
+  const ordered=CAT_ORDER.filter(c=>present.includes(c))
+    .concat(present.filter(c=>!CAT_ORDER.includes(c)));
+  const total=S.passes.length;
+  const pill=(cat,label,n)=>`<span class="subtab ${PASSCAT===cat?'sel':''}" onclick="PASSCAT='${cat}';renderPassSubtabs();renderPasses()">${esc(label)}<span class="cnt">${n}</span></span>`;
+  box.innerHTML=pill('all','Все',total)
+    +ordered.map(c=>pill(c,CAT_LABEL[c]||c,cnt[c])).join('');
+}
 function renderPasses(){
-  $('passCards').innerHTML=S.passes.map(p=>{
+  renderPassSubtabs();
+  const passes=S.passes.filter(p=>PASSCAT==='all'||passCat(p)===PASSCAT);
+  if(!passes.length){$('passCards').innerHTML='<p class="hint" style="margin:8px 0">Здесь пока пусто.</p>';return;}
+  $('passCards').innerHTML=passes.map(p=>{
     const c=S.pass_schedules[p]||{};
     // Meta comes from the backend registry; `tpl` is the pass's event template
     // (the «✎ шаблон» / «👁 Пример» target) — digest_full & digest_delta share it.
     const meta=REG[p]||{};
     const title=meta.title||p, desc=meta.description||'', tpl=meta.event_kind||p;
     const icon=passIcon(p,meta);
+    // Destination badge (self-describing card): dm → «Личка», else «Комната».
+    const dm=(meta.to||[]).includes('dm');
+    const destBadge=`<span class="tag" title="Куда уходит рассылка">${dm?'→ Личка':'→ Комната'}</span>`;
     // Every pass is single-mode now (Phase 2a split the anchor-dual digests into
     // separate full/delta passes) → one «Запустить сейчас» button, no mode arg.
     return `<div class="card" data-p="${p}">
-      <div class="row" style="margin:0"><div style="font-size:15px"><b>${icon} ${esc(title)}</b> <span class="mut mono" style="font-size:11px">${esc(p)}</span></div>
+      <div class="row" style="margin:0"><div style="font-size:15px"><b>${icon} ${esc(title)}</b> ${destBadge} <span class="mut mono" style="font-size:11px">${esc(p)}</span></div>
         <span class="spacer"></span>
         <label class="row" style="margin:0;gap:6px"><span class="mut" style="font-size:12px">вкл</span><span class="switch"><input type="checkbox" class="pEn" ${c.enabled?'checked':''}><span class="slider"></span></span></label>
         <button class="sm" onclick="passExample('${esc(tpl)}',this)">👁 Пример</button>
