@@ -56,6 +56,29 @@
   .tag{font-size:11px;padding:1px 7px;border-radius:6px;background:var(--panel2);border:1px solid var(--line);color:var(--mut);margin-right:4px}
   /* Per-card rule editor (type-enable + destination) inside a pass card. */
   .rulebox{margin:0 0 10px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel2)}
+  /* «Рассылки» pass card: clean header + summary + collapsed details + actions. */
+  .passcard{padding:14px 16px}
+  .passhead{display:flex;align-items:center;gap:12px}
+  .passicon{font-size:20px;line-height:1;flex:none;width:26px;text-align:center}
+  .passtitle{min-width:0;flex:1}
+  .passtitle b{font-size:15px}
+  .passsub{color:var(--mut);font-size:12px;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .passmeta{display:flex;align-items:center;gap:4px;flex:none}
+  .passmeta .tag{margin-right:0}
+  .passhead>.switch{flex:none}
+  .passsum{margin:10px 0 0;padding:7px 11px;background:var(--panel2);border:1px solid var(--line);
+    border-radius:8px;font-size:13px;color:var(--fg)}
+  .passsum .sumlabel{color:var(--mut);font-size:12px;margin-right:4px}
+  .pBody{margin-top:10px}
+  .pBody>summary{cursor:pointer;list-style:none;color:var(--accent2);font-size:12px;font-weight:600;
+    padding:5px 2px;user-select:none;display:inline-block}
+  .pBody>summary::-webkit-details-marker{display:none}
+  .pBody>summary:before{content:"▸ "} .pBody[open]>summary:before{content:"▾ "}
+  .pBodyInner{margin-top:8px;padding-top:12px;border-top:1px solid var(--line)}
+  .pBodyInner>.row:first-child{margin-top:0}
+  .pBodyInner .rulebox{margin:12px 0 0}
+  .passactions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end;margin-top:12px}
+  .passactions .sendsep{height:20px}
   .toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--panel2);border:1px solid var(--line);padding:10px 16px;border-radius:9px;opacity:0;transition:.2s;pointer-events:none;z-index:50}
   .toast.show{opacity:1}
   .login{max-width:340px;margin:14vh auto;text-align:center}

@@ -28,8 +28,8 @@ const DEST={room:'Комната',dm:'Личка'};
 // «Рассылки» group cards by registry `category`. Stable order + friendly RU
 // labels; unknown categories appended (label = the raw code) so new ones still
 // show up. PASSCAT is the selected sub-tab ('all' = no filter, the default).
-const CAT_ORDER=['group','personal'];
-const CAT_LABEL={group:'Групповые (в комнату)',personal:'Личные (в ЛС)'};
+const CAT_ORDER=['group','personal','webhook'];
+const CAT_LABEL={group:'Групповые (в комнату)',personal:'Личные (в ЛС)',webhook:'Вебхуки'};
 let PASSCAT='all';
 const PUSHL={default:'Как задумано',loud:'Всегда пуш',quiet:'Тихо (без пуша)'};
 function kindTitle(k){return (KIND[k]||{}).t||k;}
@@ -298,7 +298,7 @@ function toggleDest(ev,d,on){const r=S.rules.find(x=>x.event===ev);let to=r.to.s
 function miniDays(sel,prefix){return DAYS.map((d,i)=>`<span class="day ${sel.includes(i)?'sel':''}" style="padding:3px 7px;font-size:12px" data-${prefix}="${i}" onclick="this.classList.toggle('sel')">${d}</span>`).join('');}
 // Category of a pass (registry-driven), with a safe default for the rare case a
 // pass has no registry entry.
-function passCat(p){return (REG[p]||{}).category||'group';}
+function passCat(p){return (REG[p]||{}).trigger==='webhook'?'webhook':((REG[p]||{}).category||'group');}
 // The unified «Рассылки» list is ONE registry-driven list: the scheduled passes
 // (S.passes) PLUS every webhook-triggered registry entry (e.g. `issue`). Both are
 // just registry passes; the card adapts (webhook cards have no schedule/run).
@@ -338,6 +338,24 @@ function ruleBlock(ek,shared){
       ${r.enabled?'':'<span class="badge ignored">тип выключен</span>'}
       <span class="mut" style="margin-left:10px">Куда:</span>${dests}</div>${hint}</div>`;
 }
+// Human one-liner summary of WHEN/HOW a card fires (read-only, always visible).
+// Calendar: «Пн–Пт · 09:00»; interval: «каждые N ч · при ≥M изм.»; webhook: event.
+function dayRange(days){
+  if(!days||!days.length)return '—';
+  const s=[...days].sort((a,b)=>a-b);
+  // contiguous run → «Пн–Пт», else comma list.
+  const contiguous=s.every((d,i)=>i===0||d===s[i-1]+1);
+  if(contiguous&&s.length>2)return DAYS[s[0]]+'–'+DAYS[s[s.length-1]];
+  return s.map(i=>DAYS[i]).join(', ');
+}
+function passSummary(p,c,wh){
+  if(wh)return 'по событию issue (open/close/reopen)';
+  if(c.kind==='interval'){
+    const ev=c.every_hours==null?2:c.every_hours, th=c.change_threshold==null?5:c.change_threshold;
+    return `каждые ${ev} ч · при ≥${th} изм.`;
+  }
+  return `${dayRange(c.days)} · ${esc(c.time||'09:00')}`;
+}
 function renderPasses(){
   renderPassSubtabs();
   const passes=allCards().filter(p=>PASSCAT==='all'||passCat(p)===PASSCAT);
@@ -359,6 +377,14 @@ function renderPasses(){
     const trigBadge=wh
       ? `<span class="tag" title="Срабатывает в реальном времени по событию GitLab">🔔 вебхук</span>`
       : `<span class="tag" title="Идёт по расписанию (дни/время или интервал)">⏱ расписание</span>`;
+    // Header enable toggle. Scheduled: the SCHEDULE on/off (.pEn — moved here from
+    // the schedule row). Webhook: there's no schedule, so the header toggle is the
+    // notification-type on/off (the rule.enabled, via setRule) — .pEn is omitted on
+    // webhook cards (savePass is never called for them).
+    const r=(S.rules||[]).find(x=>x.event===ek);
+    const headToggle=wh
+      ? (r?`<label class="switch" title="Включить/выключить весь этот тип уведомления"><input type="checkbox" ${r.enabled?'checked':''} onchange="setRule('${ek}',{enabled:this.checked})"><span class="slider"></span></label>`:'')
+      : `<label class="switch" title="Слать эту рассылку по расписанию (планировщик)"><input type="checkbox" class="pEn" ${c.enabled?'checked':''} onchange="savePass('${p}',this)"><span class="slider"></span></label>`;
     // Webhook cards (e.g. issue) have NO schedule editor and NO «Запустить сейчас»
     // (there's nothing to schedule/trigger — they fire on the GitLab event); they
     // still expose «Пример»/«шаблон» + the type-enable + destination editor.
@@ -369,17 +395,29 @@ function renderPasses(){
     // Flag cards that SHARE an event_kind/rule with another card (digest_full ↔
     // digest_delta, team_full ↔ team_delta): the type-enable/«Куда» are common.
     const shared=allCards().filter(q=>(REG[q]||{}).event_kind===ek).length>1;
-    return `<div class="card" data-p="${p}">
-      <div class="row" style="margin:0"><div style="font-size:15px"><b>${icon} ${esc(title)}</b> ${destBadge} ${trigBadge} <span class="mut mono" style="font-size:11px">${esc(p)}</span></div>
-        <span class="spacer"></span>
+    // Subtitle: registry description (the «what»), then the technical pass name.
+    const subtitle=`${desc?esc(desc)+' · ':''}<span class="mono">${esc(p)}</span>`;
+    return `<div class="card passcard" data-p="${p}">
+      <div class="passhead">
+        <div class="passicon">${icon}</div>
+        <div class="passtitle"><b>${esc(title)}</b><div class="passsub">${subtitle}</div></div>
+        <div class="passmeta">${trigBadge} ${destBadge}</div>
+        ${headToggle}
+      </div>
+      <div class="passsum"><span class="sumlabel">${wh?'Триггер':'Когда'}:</span> ${passSummary(p,c,wh)}</div>
+      <details class="pBody"><summary>⚙ Настроить ${wh?'тип и адрес':'расписание и адрес'}</summary>
+        <div class="pBodyInner">
+          ${wh?'':passSchedEditor(p,c)}
+          ${ruleBlock(ek,shared)}
+        </div>
+      </details>
+      <div class="bubble pEx hide" style="margin:10px 0"></div>
+      <div class="pPreview"></div>
+      <div class="passactions">
         <button class="sm" onclick="passExample('${esc(tpl)}',this)">👁 Пример</button>
         <button class="sm" onclick="editTpl('${esc(tpl)}')">✎ шаблон</button>
-        ${runBtns}</div>
-      <p class="hint" style="margin:6px 0 12px">${esc(desc)}</p>
-      ${ruleBlock(ek,shared)}
-      <div class="bubble pEx hide" style="margin:10px 0"></div>
-      <div class="pPreview" style="margin-bottom:10px"></div>
-      ${wh?'':passSchedEditor(p,c)}
+        ${runBtns}
+      </div>
       <div class="pResult" style="margin-top:8px;font-size:13px"></div></div>`;
   }).join('');
 }
@@ -388,17 +426,17 @@ function renderPasses(){
 // burst of ≥change_threshold changes — so no «Время», but «Каждые … часов» and
 // «Слать раньше при ≥ … изменениях». daily/calendar: the classic days+time row.
 function passSchedEditor(p,c){
-  // The «вкл» toggle gates the SCHEDULE (planner auto-send), separate from the
-  // notification-type on/off in ruleBlock above.
-  const schedOn=`<label class="row" style="margin:0;gap:6px" title="Слать эту рассылку по расписанию (планировщик)"><span class="mut" style="font-size:12px">Расписание вкл</span><span class="switch"><input type="checkbox" class="pEn" ${c.enabled?'checked':''}><span class="slider"></span></span></label>`;
+  // The schedule on/off (.pEn) lives in the card header now; this editor holds the
+  // days/time (or interval) fields + Save. The .pEn checkbox is read by savePass
+  // from the card root, so it doesn't matter that it sits outside this block.
   if(c.kind==='interval'){
-    return `<div class="row" style="margin:0">${schedOn}<span class="mut" style="margin-left:8px">Рабочие дни:</span><div class="days pDays">${miniDays(c.days||[],'d')}</div>
+    return `<div class="row" style="margin:0"><span class="mut">Рабочие дни:</span><div class="days pDays">${miniDays(c.days||[],'d')}</div>
         <span class="mut" style="margin-left:8px">Каждые:</span><input type="number" class="pEvery" step="0.5" min="0.5" value="${c.every_hours==null?2:c.every_hours}" style="width:64px"><span class="mut">ч</span>
         <span class="mut" style="margin-left:8px">Слать раньше при ≥</span><input type="number" class="pThresh" min="0" value="${c.change_threshold==null?5:c.change_threshold}" style="width:60px"><span class="mut">изменениях</span>
         <span class="spacer"></span><button class="primary sm" onclick="savePass('${p}',this)">Сохранить</button></div>
       <p class="hint" style="margin:6px 0 0">Дельта уходит только когда есть изменения: каждые N часов в рабочие часы или раньше — при всплеске на ≥ N изменений.</p>`;
   }
-  return `<div class="row" style="margin:0">${schedOn}<span class="mut" style="margin-left:8px">Дни:</span><div class="days pDays">${miniDays(c.days||[],'d')}</div>
+  return `<div class="row" style="margin:0"><span class="mut">Дни:</span><div class="days pDays">${miniDays(c.days||[],'d')}</div>
         <span class="mut" style="margin-left:8px">Время:</span><input type="time" class="pTime" value="${esc(c.time||'09:00')}">
         ${p==='stale'?`<span class="mut" style="margin-left:8px">Без активности:</span><input type="number" class="pIdle" min="1" value="${c.days_idle||14}" style="width:60px"><span class="mut">дн.</span>`:''}
         <span class="spacer"></span><button class="primary sm" onclick="savePass('${p}',this)">Сохранить</button></div>`;
