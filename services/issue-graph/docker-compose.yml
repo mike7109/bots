@@ -1,0 +1,26 @@
+# Прод-развёртывание issue-graph: один контейнер (фронт+бэкенд), данные в томе.
+# GitLab/OAuth/бот настраиваются в админке (#admin) после старта — НЕ через env.
+#
+# Запуск:  cp .env.example .env  &&  отредактируй .env  &&  docker compose up -d
+services:
+  issue-graph:
+    # готовый образ из GHCR (собирается в CI). Для локальной сборки — раскомментируй build.
+    image: ghcr.io/${GHCR_OWNER:-OWNER}/issue-graph:latest
+    # build: .
+    restart: unless-stopped
+    environment:
+      # пароль админки (#admin). ОБЯЗАТЕЛЬНО задать.
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?set ADMIN_PASSWORD in .env}
+      # публичный адрес приложения (для OAuth-редиректов и cookie). Напр.
+      # https://issuegraph.example.com — тот же origin, что видит пользователь.
+      OAUTH_REDIRECT_BASE: ${PUBLIC_URL:?set PUBLIC_URL in .env}
+      FRONTEND_URL: ${PUBLIC_URL}
+      # CORS не нужен (один origin), но оставим на случай отдельного фронта.
+      CORS_ORIGINS: ${PUBLIC_URL}
+    volumes:
+      - ig-data:/data        # /data/.gl_config.json + /data/issue_graph.db
+    ports:
+      - "${BIND:-127.0.0.1:8000}:8000"
+
+volumes:
+  ig-data:
