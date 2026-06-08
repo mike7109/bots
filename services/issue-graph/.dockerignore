@@ -1,0 +1,10 @@
+**/node_modules
+**/dist
+**/.venv
+**/__pycache__
+**/*.pyc
+# секреты и локальные данные — НЕ попадают в образ
+backend/.gl_config.json
+backend/*.db
+.env
+*.log

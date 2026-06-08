@@ -8,3 +8,14 @@ __pycache__/
 *.egg-info/
 .ruff_cache/
 .pytest_cache/
+
+# локальные docker-compose оверрайды (env-специфичные, не для репо)
+docker-compose.override.yml
+
+# issue-graph: секреты и локальные данные (НЕ коммитить!)
+services/issue-graph/backend/.gl_config.json
+services/issue-graph/backend/*.db
+# фронт-артефакты
+node_modules/
+services/issue-graph/frontend/dist/
+services/issue-graph/frontend/*.tsbuildinfo
