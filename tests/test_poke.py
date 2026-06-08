@@ -280,14 +280,18 @@ def test_delivery_failure_502_logs_error(store, settings, identity, monkeypatch)
 
 
 # --- escaping ---------------------------------------------------------
-def test_custom_message_is_escaped(store, settings, identity, monkeypatch):
+def test_comment_appended_below_poke_and_escaped(store, settings, identity, monkeypatch):
+    # The optional comment is appended UNDER the standard poke (task context is
+    # never lost), escaped, with newlines kept as <br>.
     mx = FakeMatrix()
     client = _client(store, settings, identity, mx, _guard(store), monkeypatch)
-    body = _body(message="<script>alert(1)</script>\nline2")
+    body = _body(message="<script>alert(1)</script>\nline2", poked_by="Анна")
     assert client.post("/api/poke", json=body, headers=_auth()).status_code == 200
     html = mx.sends[0]["html"]
-    assert "<script>" not in html and "&lt;script&gt;" in html
-    assert "<br>" in html                             # newline preserved as <br>
+    assert "#5" in html and "пнул тебя" in html        # standard poke still present
+    assert "💬" in html and "&lt;script&gt;" in html and "<script>" not in html
+    assert "<br>" in html                              # newline preserved as <br>
+    assert html.index("💬") > html.index("#5")         # comment comes after the task
 
 
 def test_default_message_escapes_issue_title(store, settings, identity, monkeypatch):
@@ -322,4 +326,6 @@ def test_no_poked_by_keeps_generic_message(store, settings, identity, monkeypatc
     mx = FakeMatrix()
     client = _client(store, settings, identity, mx, _guard(store), monkeypatch)
     assert client.post("/api/poke", json=_body(), headers=_auth()).status_code == 200
-    assert "Тебя пнули" in mx.sends[0]["html"]
+    html = mx.sends[0]["html"]
+    assert "Тебя пнули" in html
+    assert "💬" not in html                            # no comment -> no comment line

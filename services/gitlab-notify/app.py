@@ -99,7 +99,9 @@ async def poke(request: Request, authorization: str = Header(default="")):
 
     Contract (from issue-graph): POST /api/poke, header
     `Authorization: Bearer <poke_token>`, JSON body
-    {gitlab_username, issue:{iid,title,web_url,project_path}, message?}.
+    {gitlab_username, issue:{iid,title,web_url,project_path}, poked_by?, message?}.
+    `message` is an OPTIONAL comment appended below the standard poke (not a
+    replacement); `poked_by` is the actor's display name.
     """
     # 1) Token (fail-closed, exactly like webhook_secret): no token configured ->
     #    the feature is OFF; a configured token must match constant-time.
@@ -150,19 +152,21 @@ async def poke(request: Request, authorization: str = Header(default="")):
     if ctx.guard is not None and ctx.guard.blocked():
         return _poke_fail("предохранитель сработал — отправка остановлена", 503)
 
-    # 7) Build the message. Issue title/url come from GitLab -> ESCAPE everything.
-    custom = (body.get("message") or "").strip() if isinstance(body.get("message"), str) else ""
-    if custom:
-        html = str(escape(custom)).replace("\n", "<br>")   # plain text, keep line breaks
-    else:
-        title = escape(issue.get("title") or "")
-        web_url = issue.get("web_url") or ""
-        # Optional «who poked» — issue-graph may send the actor's name/login.
-        by = body.get("poked_by")
-        by = by.strip() if isinstance(by, str) else ""
-        who = f"<b>{escape(by)}</b> пнул тебя" if by else "Тебя пнули"
-        html = (f"🔔 {who} по задаче <b>#{escape(iid)} {title}</b><br>"
-                f'<a href="{escape(_safe_url(web_url))}">{escape(web_url)}</a>')
+    # 7) Build the message: the standard poke (who + task + link) ALWAYS, plus an
+    #    OPTIONAL free-text comment the poker added in issue-graph, appended below
+    #    — not instead of the task context. Title/url come from GitLab and the
+    #    comment from a user, so ESCAPE everything.
+    title = escape(issue.get("title") or "")
+    web_url = issue.get("web_url") or ""
+    # Optional «who poked» — issue-graph may send the actor's name/login.
+    by = body.get("poked_by")
+    by = by.strip() if isinstance(by, str) else ""
+    who = f"<b>{escape(by)}</b> пнул тебя" if by else "Тебя пнули"
+    html = (f"🔔 {who} по задаче <b>#{escape(iid)} {title}</b><br>"
+            f'<a href="{escape(_safe_url(web_url))}">{escape(web_url)}</a>')
+    comment = (body.get("message") or "").strip() if isinstance(body.get("message"), str) else ""
+    if comment:
+        html += "<br>💬 " + str(escape(comment)).replace("\n", "<br>")   # keep line breaks
 
     # 8) Send the DM directly (bypass mute, no room fallback).
     try:
