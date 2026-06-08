@@ -5,8 +5,9 @@
 #   docker compose pull && docker compose up -d
 #
 # Every service binds 127.0.0.1 only. Point each GitLab webhook at the matching
-# localhost port. Config/templates for gitlab-notify are mounted from the repo
-# so wording/routing changes are just `docker compose restart gitlab-notify`.
+# localhost port. config.yaml + templates are baked into the image, so updating
+# gitlab-notify is just `docker compose pull && up -d`; live wording tweaks go
+# through the admin panel's per-template DB overrides (no rebuild, no file sync).
 services:
   gitlab-notify:
     image: ghcr.io/mike7109/gitlab-notify:latest
@@ -16,9 +17,7 @@ services:
     ports:
       - "127.0.0.1:8081:8080"
     volumes:
-      - ../services/gitlab-notify/config.yaml:/app/svc/config.yaml:ro
-      - ../services/gitlab-notify/templates:/app/svc/templates   # rw: admin panel edits templates
-      - gitlab-notify-state:/data            # SQLite: dedup ledger + runtime settings (STATE_DB=/data/state.db)
+      - gitlab-notify-state:/data            # SQLite: dedup ledger + runtime settings + template overrides (STATE_DB=/data/state.db)
     # Web admin panel at http://127.0.0.1:8081/admin (set ADMIN_PASSWORD in the env file).
 
   gitlab-expand-tasks:

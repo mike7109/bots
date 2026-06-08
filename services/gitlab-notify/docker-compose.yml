@@ -2,9 +2,11 @@
 #   cp .env.example .env   # fill in real values
 #   docker compose pull && docker compose up -d
 #
-# config.yaml + templates/ are mounted so you can tweak wording/routing and
-# just `docker compose restart` — no rebuild. The /data volume holds runtime
-# state (dedup, settings, logs); the admin panel + scheduler need it.
+# The image is the single source of truth: config.yaml + templates + static/ are
+# baked in (Dockerfile `COPY services/gitlab-notify /app/svc`), so an update is
+# just `docker compose pull && docker compose up -d` — nothing to sync by hand.
+# Live wording tweaks (no rebuild) go through the admin panel's per-template
+# DB overrides. The /data volume holds runtime state (dedup, settings, logs).
 # Set BIND_ADDR in .env to expose the admin panel on the LAN (e.g. 172.16.1.10);
 # defaults to 127.0.0.1 (reach /admin over an SSH tunnel).
 services:
@@ -16,9 +18,7 @@ services:
     ports:
       - "${BIND_ADDR:-127.0.0.1}:8081:8080"
     volumes:
-      - ./config.yaml:/app/svc/config.yaml:ro    # boot-only, неизменяем
-      - ./templates:/app/svc/templates:ro        # дефолты шаблонов (правки — в БД-оверрайды)
-      - gitlab-notify-state:/data                # SQLite: всё мутабельное (настройки, оверрайды, логи)
+      - gitlab-notify-state:/data                # SQLite: всё мутабельное (настройки, оверрайды шаблонов, логи)
     healthcheck:
       test: ["CMD", "python", "-c",
              "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/healthz').status==200 else 1)"]
