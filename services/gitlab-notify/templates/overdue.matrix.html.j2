@@ -1,2 +1,6 @@
-{% if labels %}{{ labels_html(labels) }}<br>{% endif %}⏰ <b>Просрочено</b> (дедлайн был {{ due | ru_date }}){{ who(assignees) }}<br>
-<a href="{{ url | safe_url }}">#{{ iid }}</a> <b>{{ title | truncate(120, true, '…', 0) }}</b>
+⏰ <b>Просроченные задачи</b> · {{ extra.total }}
+<ul>
+{% for it in extra["items"] %}
+<li><a href="{{ it.url | safe_url }}">#{{ it.iid }}</a> {{ it.title | truncate(70, true, '…', 0) }} — <i>был {{ it.due | ru_date }}</i></li>
+{% endfor %}
+</ul>

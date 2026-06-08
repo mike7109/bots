@@ -217,100 +217,80 @@ def _render(engine, event: Event) -> str | None:
         return None
 
 
-# --- per-issue reminders (due-soon / overdue) ----------------------------
-# These two passes share `_remind` (filter -> per-day dedup -> handle -> mark).
-# They live here (not cron.py) so the pass registry can import a single module.
-def _event(issue: dict, *, kind: str, action: str, room=None) -> Event:
-    """Build a single-issue Event from a GitLab REST issue object."""
-    assignees = [a.get("username") for a in (issue.get("assignees") or []) if a.get("username")]
-    return Event(
-        kind=kind,
-        action=action,
-        project=(issue.get("references") or {}).get("full", "").rsplit("#", 1)[0],
-        iid=str(issue.get("iid", "")),
-        title=issue.get("title", ""),
-        url=issue.get("web_url", ""),
-        state=issue.get("state", ""),
-        labels=issue.get("labels", []),
-        assignees=assignees,
-        due=issue.get("due_date"),
-        room=room,
-    )
-
-
-def _remind(engine, issues: list[dict], store, *, kind: str, action: str,
-            due_predicate, room=None, skey: str = "", warn_undelivered: bool = False,
-            commit: bool = True, dry: bool = False):
-    """Filter -> per-day dedup -> handle -> mark loop, shared by the reminders.
-
-    `due_predicate(due)` selects which issues to remind on (due-tomorrow for the
-    soon pass, past-due for overdue). The dedup key is the global issue id
-    namespaced by source (`keys.ns`), so a second run the same day is a no-op and
-    two groups sharing an id don't collide. `warn_undelivered` logs each issue
-    the engine failed to deliver (overdue only, matching the original).
-
-    `commit=False` (manual) ignores the per-issue dedup and never marks sent, so
-    a manual run re-sends every matching item statelessly. `dry=True` renders a
-    sample for the first matching issue without dispatching. Returns
-    `(sent, recipients, sample_html)`: `recipients` is the per-issue assignee
-    logins (dm passes) or the room (room passes).
-    """
-    sent = 0
-    recipients: list[str] = []
-    sample_html = None
-    room_pass = action == "due"                 # due_soon -> room; overdue -> dm
-    for issue in issues:
-        if not due_predicate(issue.get("due_date")):
-            continue
-        key = keys.ns(skey, issue.get("id"))   # global issue id — stable across renames
-        if commit and store.already_sent(kind, key):
-            continue
-        event = _event(issue, kind=kind, action=action, room=room)
-        if sample_html is None:
-            sample_html = _render(engine, event)
-        if room_pass:
-            for r in _room_recipients(room):
-                if r not in recipients:
-                    recipients.append(r)
-        else:
-            for login in event.assignees:
-                if login not in recipients:
-                    recipients.append(login)
-        if dry:
-            continue
-        result = engine.handle(event)
-        if result.get("sent"):
-            if commit:
-                store.mark_sent(kind, key)
-            sent += 1
-        elif warn_undelivered:
-            log.warning("overdue #%s not delivered: %s", issue.get("iid"), result)
-    return sent, recipients, sample_html
+# --- consolidated reminders (due-soon / overdue) ------------------------
+# Both reminders roll many issues into ONE message instead of one-per-issue:
+# due_soon -> a single shared-room list of everything due tomorrow (assignees
+# @-pinged inline); overdue -> one personal DM per assignee with all of THEIR
+# past-due tasks. They flow through the same engine/templates as the digests
+# (the list rides on `extra.items`), so routing, dedup and the send-guard stay
+# identical to everything else.
 
 
 def run_due_soon(engine, issues: list[dict], store, *, room=None, skey: str = "",
                  commit: bool = True, dry: bool = False) -> dict:
+    """Issues whose deadline is tomorrow -> ONE shared-room message listing them
+    all, assignees @-pinged inline (was one message per issue). Deduped once per
+    day for the group; `commit=False` (manual) re-sends and writes no ledger.
+    """
+    today = dt.date.today().isoformat()
     tomorrow = (dt.date.today() + dt.timedelta(days=1)).isoformat()
-    sent, recipients, html = _remind(
-        engine, issues, store, kind=keys.DUE_SOON, action="due",
-        due_predicate=lambda due: due == tomorrow, room=room, skey=skey,
-        commit=commit, dry=dry)
-    log.info("due tomorrow (%s): %d reminder(s) sent", tomorrow, sent)
-    reason = "ok" if (sent or (dry and recipients)) else "empty"
-    return _result(sent, reason, recipients, html=html)
+    rows = _by_due([_row(i) for i in issues if i.get("due_date") == tomorrow])
+    if not rows:
+        log.info("due tomorrow (%s): nothing to remind", tomorrow)
+        return _result(0, "empty", [])
+    extra = {"date": tomorrow, "total": len(rows), "items": rows}
+    return _emit(engine, store, keys.DUE_SOON, keys.ns(skey, "group"), extra,
+                 day=today, room=room, commit=commit, dry=dry)
 
 
 def run_overdue(engine, issues: list[dict], store, *, room=None, skey: str = "",
                 commit: bool = True, dry: bool = False) -> dict:
-    """Open issues whose due_date is already in the past -> DM, once per day."""
+    """Open past-due issues -> ONE personal DM per assignee, listing all of THAT
+    person's overdue tasks (was one DM per issue, so a multi-assignee issue is no
+    longer N identical pings). One DM per person per day.
+
+    Issues with no assignee aren't anyone's personal reminder, so they're skipped
+    here on purpose — they still surface in triage ("без исполнителя") and the
+    team digest's overdue section. Mirrors `personal`'s per-recipient loop:
+    `commit=False` (manual) bypasses the per-day dedup and writes no ledger;
+    `dry=True` renders the first recipient's sample without dispatching.
+    """
     today = dt.date.today().isoformat()
-    sent, recipients, html = _remind(
-        engine, issues, store, kind=keys.OVERDUE, action="overdue",
-        due_predicate=lambda due: bool(due) and due < today,
-        room=room, skey=skey, warn_undelivered=True, commit=commit, dry=dry)
-    log.info("overdue (before %s): %d reminder(s) sent", today, sent)
-    reason = "ok" if (sent or (dry and recipients)) else "empty"
-    return _result(sent, reason, recipients, html=html)
+    overdue = [i for i in issues if i.get("due_date") and i["due_date"] < today]
+
+    by_user: dict[str, list[dict]] = {}
+    for issue in overdue:
+        for a in (issue.get("assignees") or []):
+            login = a.get("username")
+            if login:
+                by_user.setdefault(login, []).append(issue)
+
+    sent = 0
+    recipients: list[str] = []
+    reasons: list[str] = []
+    sample_html = None
+    for login, items in sorted(by_user.items()):
+        pkey = keys.ns(skey, login)
+        if commit and store.already_sent(keys.OVERDUE, pkey, day=today):  # one DM per person per day
+            continue
+        rows = _by_due([_row(i) for i in items])
+        extra = {"date": today, "total": len(rows), "items": rows}
+        event = Event(kind=keys.OVERDUE, action="digest", assignees=[login], extra=extra, room=room)
+        if sample_html is None:
+            sample_html = _render(engine, event)
+        reasons.append("ok")
+        recipients.append(login)
+        if dry:
+            continue
+        result = engine.handle(event)
+        if result.get("sent"):
+            sent += 1
+            if commit:
+                store.mark_sent(keys.OVERDUE, pkey, day=today)
+        else:
+            log.warning("%s [%s] not delivered: %s", keys.OVERDUE, pkey, result)
+    log.info("overdue (before %s): %d DM(s) sent", today, sent)
+    return _result(sent, _aggregate_reason(reasons), recipients, html=sample_html)
 
 
 # --- passes --------------------------------------------------------------

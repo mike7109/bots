@@ -1,10 +1,11 @@
-"""cron._remind / run_due_soon / run_overdue: per-issue reminders.
+"""run_due_soon / run_overdue: consolidated reminders.
 
-These two passes share `_remind` (filter -> per-day dedup -> handle -> mark).
-The tests pin behaviour the refactor must preserve: due_soon fires once per
-due-tomorrow issue and is a no-op on a second run the same day; overdue fires
-for past-due issues and likewise dedups; non-matching issues are skipped; and
-the source `skey` namespaces the dedup ledger so two sources don't collide.
+Both roll many issues into ONE message: due_soon -> a single shared-room list of
+everything due tomorrow (deduped once per day for the group); overdue -> one
+personal DM per assignee with all of THAT person's past-due tasks (deduped once
+per day per person). The tests pin: consolidation (N issues -> 1 message per
+recipient), per-day dedup, non-matching issues skipped, unassigned overdue
+skipped (nobody to personally remind), and `skey` namespacing the ledger.
 """
 from __future__ import annotations
 
@@ -33,9 +34,12 @@ class _Engine:
         return {"sent": ["room"]} if self.deliver else {}
 
 
-def _issue(iid, *, gid=None, due=None):
-    return {"id": gid if gid is not None else iid, "iid": iid, "due_date": due,
-            "title": f"issue {iid}", "web_url": f"u/{iid}"}
+def _issue(iid, *, gid=None, due=None, who=None):
+    issue = {"id": gid if gid is not None else iid, "iid": iid, "due_date": due,
+             "title": f"issue {iid}", "web_url": f"u/{iid}"}
+    if who is not None:
+        issue["assignees"] = [{"username": u} for u in who]
+    return issue
 
 
 # run_due_soon / run_overdue now return the uniform result dict
@@ -45,12 +49,14 @@ def _sent(result) -> int:
 
 
 # --- due_soon ------------------------------------------------------------
-def test_due_soon_fires_once_per_due_tomorrow_issue(tmp_path):
+def test_due_soon_one_message_for_all_due_tomorrow(tmp_path):
+    # N issues due tomorrow -> ONE consolidated room message carrying them all.
     store = Store(path=str(tmp_path / "s.db"))
     engine = _Engine()
     issues = [_issue(1, gid=11, due=TOMORROW), _issue(2, gid=22, due=TOMORROW)]
-    assert _sent(cron.run_due_soon(engine, issues, store)) == 2
-    assert len(engine.handled) == 2
+    assert _sent(cron.run_due_soon(engine, issues, store)) == 1
+    assert len(engine.handled) == 1
+    assert {it["iid"] for it in engine.handled[0].extra["items"]} == {1, 2}
 
 
 def test_due_soon_dedups_second_run_same_day(tmp_path):
@@ -76,18 +82,34 @@ def test_due_soon_skips_non_matching(tmp_path):
 
 
 # --- overdue -------------------------------------------------------------
-def test_overdue_fires_for_past_due(tmp_path):
+def test_overdue_one_dm_per_person(tmp_path):
+    # Each assignee gets ONE DM with ALL their overdue tasks (not one per issue).
     store = Store(path=str(tmp_path / "s.db"))
     engine = _Engine()
-    issues = [_issue(1, gid=11, due=YESTERDAY), _issue(2, gid=22, due=YESTERDAY)]
-    assert _sent(cron.run_overdue(engine, issues, store)) == 2
+    issues = [
+        _issue(1, gid=11, due=YESTERDAY, who=["alice"]),
+        _issue(2, gid=22, due=YESTERDAY, who=["alice", "bob"]),
+    ]
+    assert _sent(cron.run_overdue(engine, issues, store)) == 2   # alice + bob, one DM each
     assert len(engine.handled) == 2
+    by_login = {e.assignees[0]: e for e in engine.handled}
+    assert {it["iid"] for it in by_login["alice"].extra["items"]} == {1, 2}
+    assert {it["iid"] for it in by_login["bob"].extra["items"]} == {2}
+
+
+def test_overdue_unassigned_issue_is_skipped(tmp_path):
+    # No assignee -> nobody to personally remind (triage / team digest cover it).
+    store = Store(path=str(tmp_path / "s.db"))
+    engine = _Engine()
+    issues = [_issue(1, gid=11, due=YESTERDAY)]      # no assignees
+    assert _sent(cron.run_overdue(engine, issues, store)) == 0
+    assert engine.handled == []
 
 
 def test_overdue_dedups_second_run_same_day(tmp_path):
     store = Store(path=str(tmp_path / "s.db"))
     engine = _Engine()
-    issues = [_issue(1, gid=11, due=YESTERDAY)]
+    issues = [_issue(1, gid=11, due=YESTERDAY, who=["alice"])]
     assert _sent(cron.run_overdue(engine, issues, store)) == 1
     assert _sent(cron.run_overdue(engine, issues, store)) == 0
     assert len(engine.handled) == 1
@@ -97,9 +119,9 @@ def test_overdue_skips_today_and_future_and_undated(tmp_path):
     store = Store(path=str(tmp_path / "s.db"))
     engine = _Engine()
     issues = [
-        _issue(1, gid=11, due=TODAY.isoformat()),   # due today is NOT overdue
-        _issue(2, gid=22, due=TOMORROW),
-        _issue(3, gid=33, due=None),
+        _issue(1, gid=11, due=TODAY.isoformat(), who=["alice"]),   # due today is NOT overdue
+        _issue(2, gid=22, due=TOMORROW, who=["alice"]),
+        _issue(3, gid=33, due=None, who=["alice"]),
     ]
     assert _sent(cron.run_overdue(engine, issues, store)) == 0
     assert engine.handled == []
@@ -108,7 +130,7 @@ def test_overdue_skips_today_and_future_and_undated(tmp_path):
 def test_overdue_not_marked_when_undelivered(tmp_path):
     # An undelivered event must NOT burn the dedup slot, so a retry still fires.
     store = Store(path=str(tmp_path / "s.db"))
-    issues = [_issue(1, gid=11, due=YESTERDAY)]
+    issues = [_issue(1, gid=11, due=YESTERDAY, who=["alice"])]
     assert _sent(cron.run_overdue(_Engine(deliver=False), issues, store)) == 0
     assert _sent(cron.run_overdue(_Engine(deliver=True), issues, store)) == 1
 
@@ -135,7 +157,7 @@ def test_due_soon_manual_repeatable_no_ledger(tmp_path):
     r2 = cron.run_due_soon(engine, issues, store, commit=False)
     assert r1["sent"] == 1 and r2["sent"] == 1          # both send (no dedup)
     assert len(engine.handled) == 2
-    assert not store.already_sent("due_soon", "11")     # nothing marked
+    assert not store.already_sent("due_soon", "group")  # nothing marked (skey="" -> "group")
 
 
 def test_overdue_manual_recipients_are_assignee_logins(tmp_path):
@@ -159,7 +181,7 @@ def test_overdue_dry_renders_without_dispatch(tmp_path):
     assert r["sent"] == 0 and r["reason"] == "ok"
     assert r["recipients"] == ["misha"]
     assert engine.handled == []                          # dry never dispatches
-    assert not store.already_sent("overdue", "11")
+    assert not store.already_sent("overdue", "misha")    # per-person key, nothing marked
 
 
 # --- run_one: the dispatch the scheduler + admin both go through ----------
