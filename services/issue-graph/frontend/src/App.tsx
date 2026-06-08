@@ -1669,7 +1669,6 @@ export default function App() {
   const overloaded = !!data && data.meta.issue_count > OVERLOAD_THRESHOLD;
   // ключ закрытия плашек привязан к текущей области (см. dismissBanner)
   const scopeKey = scope ? `${scope.kind}:${scope.id}` : "none";
-  const mineDismissed = dismissed.has(`mine:${scopeKey}`);
   const overloadDismissed = dismissed.has(`overload:${scopeKey}`);
   // исполнители: из задач графа (доступно всегда, без админских прав) + участники
   const assigneeOptions = (() => {
@@ -2007,6 +2006,25 @@ export default function App() {
       </header>
 
       <div className={`filters ${filtersOpen ? "" : "hidden"}`}>
+        {/* «Мои / Все» — режим загрузки (assignee=me на бэке), не клиентский фильтр.
+            Дублирует плашку «Ваши задачи», но доступен всегда — чтобы не застрять
+            в «моих». Только при известном пользователе (для PAT без username — нет). */}
+        {user?.username && (
+          <div className="state-toggle" title="Показывать только ваши задачи или все">
+            <button
+              className={myTasks ? "on" : ""}
+              onClick={() => setMyTasks(true)}
+            >
+              мои
+            </button>
+            <button
+              className={!myTasks ? "on" : ""}
+              onClick={() => setMyTasks(false)}
+            >
+              все
+            </button>
+          </div>
+        )}
         {/* P2: строка поиска вынесена в топбар (всегда видна) — здесь дубль убран,
             чтобы не было двух источников правды; state search общий. */}
         <select value={fState} onChange={(e) => setFState(e.target.value)}>
@@ -2143,8 +2161,11 @@ export default function App() {
               Этап 12: в режиме «Доска» не показываем (плашки про плотность графа). */}
           {data && !boardMode && (
             <div className="canvas-banners">
-              {/* «Мои задачи»: видимая плашка + быстрый выход в общий вид */}
-              {myTasks && !mineDismissed && (
+              {/* «Мои задачи» — это РЕЖИМ загрузки (assignee=me на бэке), не фильтр.
+                  Плашку НЕ закрываем крестиком: выход только «показать все», иначе
+                  можно застрять в «моих» без кнопки возврата. Тот же тумблер «Мои/
+                  Все» продублирован в панели «Фильтры». */}
+              {myTasks && (
                 <div className="cv-banner mine">
                   <span className="cb-ic">⭐</span>
                   <span className="cb-text">
@@ -2156,14 +2177,6 @@ export default function App() {
                     title="Показать все задачи области (не только ваши)"
                   >
                     показать все
-                  </button>
-                  <button
-                    className="cb-close"
-                    onClick={() => dismissBanner(`mine:${scopeKey}`)}
-                    title="Скрыть плашку"
-                    aria-label="Скрыть плашку"
-                  >
-                    ✕
                   </button>
                 </div>
               )}
