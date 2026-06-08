@@ -5,6 +5,7 @@ import {
   useRef,
   useState,
   type MouseEvent as ReactMouseEvent,
+  type ReactNode,
 } from "react";
 import ReactFlow, {
   Background,
@@ -22,7 +23,6 @@ import ReactFlow, {
   type Node,
   type ReactFlowInstance,
 } from "reactflow";
-import { toPng } from "html-to-image";
 import { api } from "./api";
 import { nodeAccent, readableText } from "./colors";
 import { IssueNode } from "./IssueNode";
@@ -35,6 +35,7 @@ import {
   columnHeaders,
   NODE_W,
   NODE_H,
+  COL_W,
   COLLAPSED_W,
   type Column,
   type GraphLayout,
@@ -232,7 +233,6 @@ export default function App() {
   // Канал — onSelectionChange ReactFlow; single-select (selectedId) живёт отдельно.
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [bulkBusy, setBulkBusy] = useState(false);
-  const [exporting, setExporting] = useState(false); // идёт ли экспорт PNG
   // Этап 6 (паритет): детали выбранной задачи (description/weight/time_stats/MR),
   // подгружаются отдельным запросом при клике на ноду. null — ещё не загружено.
   const [detail, setDetail] = useState<IssueDetail | null>(null);
@@ -360,7 +360,7 @@ export default function App() {
   // нужен для setCenter по результату поиска
   const rfRef = useRef<ReactFlowInstance | null>(null);
   // Этап 7: враппер холста — для лупы (screen-точки рамки относительно него) и
-  // экспорта PNG (рендерим именно область графа, без сайдбара/тулбара).
+  // как контейнер нижнего левого дока (переключатель режима + раскладка).
   const canvasRef = useRef<HTMLDivElement | null>(null);
 
   // сохранённые вручную позиции нод (по области), переживают перезагрузку
@@ -1235,11 +1235,27 @@ export default function App() {
 
   // точечное обновление одной ноды из ответа PATCH — без перезагрузки всего графа
   const applyNodePatch = useCallback((updated: GraphData["nodes"][number]) => {
-    setData((d) =>
-      d
-        ? { ...d, nodes: d.nodes.map((n) => (n.id === updated.id ? updated : n)) }
-        : d
-    );
+    setData((d) => {
+      if (!d) return d;
+      // PATCH/PUT-ответ GitLab отдаёт метки БЕЗ цвета (только имена-строки) —
+      // восстановим цвет по имени из meta.labels и из прежней ноды, иначе чипы
+      // меток на доске/в графе теряют цвет после переноса/правки задачи.
+      const colorByName = new Map<string, string>();
+      for (const l of d.meta.labels) if (l.color) colorByName.set(l.name, l.color);
+      const prev = d.nodes.find((n) => n.id === updated.id);
+      if (prev)
+        for (const l of prev.labels) if (l.color) colorByName.set(l.name, l.color);
+      const recolored = {
+        ...updated,
+        labels: updated.labels.map((l) =>
+          l.color ? l : { ...l, color: colorByName.get(l.name) ?? l.color }
+        ),
+      };
+      return {
+        ...d,
+        nodes: d.nodes.map((n) => (n.id === updated.id ? recolored : n)),
+      };
+    });
   }, []);
 
   const changeSprint = async (msId: number | null) => {
@@ -1401,13 +1417,8 @@ export default function App() {
     return () => clearTimeout(t);
   }, [pulseId]);
 
-  // ── Этап 7: команды холста (Fit / фокус на соседях / нода на холсте / PNG) ──
-
-  // вписать всё в экран (дублирует кнопку зум-контрола — но в левой панели рядом
-  // с навигацией это привычнее; сам ZoomControl кнопку Fit оставляем как было).
-  const fitAll = useCallback(() => {
-    rfRef.current?.fitView({ duration: 300, padding: 0.15, maxZoom: 1 });
-  }, []);
+  // ── Этап 7: команды холста (фокус на соседях / нода на холсте) ──
+  // «Вписать всё в экран» (Fit) живёт в зум-контроле (низ-лево, рядом с −/%/+).
 
   // 🎯 фокус на соседях: bbox выбранной ноды + её прямых связей → fitBounds, без
   // релейаута (используем уже посчитанную раскладку из rf.getNodes()).
@@ -1443,39 +1454,6 @@ export default function App() {
     setCreating(true);
     setSidebarOpen(true);
   }, []);
-
-  // 🖼 экспорт PNG области графа через html-to-image. Берём viewport-слой
-  // ReactFlow, чтобы не попали контролы/панели; фон — под тему.
-  const exportPng = useCallback(async () => {
-    const root = canvasRef.current;
-    if (!root) return;
-    const vp = root.querySelector(
-      ".react-flow__viewport"
-    ) as HTMLElement | null;
-    if (!vp) return;
-    setExporting(true);
-    try {
-      const bg = theme === "dark" ? "#161a26" : "#ffffff";
-      const url = await toPng(vp, {
-        backgroundColor: bg,
-        pixelRatio: 2,
-        // не тянуть в PNG служебные слои (хэндлы/кнопки связей по наведению)
-        filter: (el) =>
-          !(el instanceof Element && el.classList?.contains("conn-btn")),
-      });
-      const a = document.createElement("a");
-      a.download = `issue-graph-${scope?.label ?? "export"}.png`.replace(
-        /[^\w.-]+/g,
-        "_"
-      );
-      a.href = url;
-      a.click();
-    } catch (e) {
-      setToast("Не удалось экспортировать PNG: " + e);
-    } finally {
-      setExporting(false);
-    }
-  }, [theme, scope]);
 
   // ── лупа (zoom-to-area): тянем рамку при tool='zoomArea', по отпусканию
   // переводим screen-точки в координаты холста и fitBounds в выделенную область,
@@ -1798,23 +1776,8 @@ export default function App() {
           </optgroup>
         </select>
 
-        {/* Этап 12 (D8): переключатель режима «Доска» (GitLab-style) ↔ «Граф».
-            В режиме «Доска» групповые контролы холста скрыты (нерелевантны). */}
-        <button
-          className={`btn-pill board-toggle ${boardMode ? "on" : ""}`}
-          onClick={() => {
-            setSelectedId(null);
-            setBoardMode((v) => !v);
-          }}
-          title={
-            boardMode
-              ? "Вернуться к графу/холсту"
-              : "Режим «Доска» (GitLab-style, импорт из GitLab)"
-          }
-        >
-          {boardMode ? "← Граф" : "▦ Доска"}
-        </button>
-
+        {/* Этап 12 (D8): переключатель режима «Граф» ↔ «Доска» переехал в нижний
+            левый док холста (.canvas-dock) — сегментированная пилюля. */}
         {!boardMode && (
           <label className="groupby" title="Как разложить ноды на холсте">
             <span>вид</span>
@@ -2363,55 +2326,14 @@ export default function App() {
             <LeftToolbar
               tool={tool}
               setTool={setTool}
-              onFit={fitAll}
               onFocusNeighbors={focusNeighbors}
               canFocus={!!selectedId}
               onAddNode={addNodeOnCanvas}
               canAddNode={!!data}
-              onExportPng={exportPng}
-              exporting={exporting}
               showMiniMap={showMiniMap}
               onToggleMiniMap={() => setShowMiniMap((v) => !v)}
             />
             <ZoomControl />
-            <Panel position="bottom-center">
-              <div className="layout-dock">
-                {groupBy === "none" &&
-                  (
-                    [
-                      { k: "td", t: "Сверху вниз", icon: "↓" },
-                      { k: "lr", t: "Слева направо", icon: "→" },
-                      { k: "radial", t: "Радиальная (звезда)", icon: "✸" },
-                    ] as const
-                  ).map((o) => (
-                    <button
-                      key={o.k}
-                      className={graphLayout === o.k ? "on" : ""}
-                      title={
-                        o.k === "radial"
-                          ? "Радиальная: выбранная задача в центре, связанные — вокруг"
-                          : o.t
-                      }
-                      onClick={() => setGraphLayout(o.k)}
-                    >
-                      <span className="ld-ic">{o.icon}</span>
-                      {o.t}
-                    </button>
-                  ))}
-                {hasPins && (
-                  <>
-                    {groupBy === "none" && <span className="ld-sep" />}
-                    <button
-                      className="ld-reset"
-                      title="Сбросить ручные позиции и вернуть авто-раскладку"
-                      onClick={resetLayout}
-                    >
-                      <span className="ld-ic">⟲</span> Авто-раскладка
-                    </button>
-                  </>
-                )}
-              </div>
-            </Panel>
             {showMiniMap && (
               <MiniMap
                 pannable
@@ -2474,6 +2396,75 @@ export default function App() {
             )}
           </ReactFlow>
           )}
+
+          {/* Нижний ЦЕНТРАЛЬНЫЙ док холста: сегментный переключатель «Граф | Доска»
+              + рядом кнопки раскладки графа. Виден в ОБОИХ режимах (вне
+              ReactFlow/BoardView); раскладка — только в режиме «Граф». */}
+          <div className="canvas-dock">
+            <div className="mode-toggle" role="group" aria-label="Режим отображения">
+              <button
+                className={`mt-seg ${!boardMode ? "on" : ""}`}
+                onClick={() => {
+                  setSelectedId(null);
+                  setBoardMode(false);
+                }}
+                title="Граф / холст зависимостей"
+              >
+                <span className="mt-ic">◆</span> Граф
+              </button>
+              <button
+                className={`mt-seg ${boardMode ? "on" : ""}`}
+                onClick={() => {
+                  setSelectedId(null);
+                  setBoardMode(true);
+                }}
+                title="Режим «Доска» (GitLab-style, импорт из GitLab)"
+              >
+                <span className="mt-ic">▦</span> Доска
+              </button>
+            </div>
+
+            {/* кнопки раскладки графа — РЯДОМ с тумблером (общий док по центру внизу);
+                только режим «Граф» и вид «граф зависимостей»; сброс — при пинах */}
+            {!boardMode && (groupBy === "none" || hasPins) && (
+              <div className="layout-dock">
+                {groupBy === "none" &&
+                  (
+                    [
+                      { k: "td", t: "Сверху вниз", icon: "↓" },
+                      { k: "lr", t: "Слева направо", icon: "→" },
+                      { k: "radial", t: "Радиальная (звезда)", icon: "✸" },
+                    ] as const
+                  ).map((o) => (
+                    <button
+                      key={o.k}
+                      className={graphLayout === o.k ? "on" : ""}
+                      title={
+                        o.k === "radial"
+                          ? "Радиальная: выбранная задача в центре, связанные — вокруг"
+                          : o.t
+                      }
+                      onClick={() => setGraphLayout(o.k)}
+                    >
+                      <span className="ld-ic">{o.icon}</span>
+                      {o.t}
+                    </button>
+                  ))}
+                {hasPins && (
+                  <>
+                    {groupBy === "none" && <span className="ld-sep" />}
+                    <button
+                      className="ld-reset"
+                      title="Сбросить ручные позиции и вернуть авто-раскладку"
+                      onClick={resetLayout}
+                    >
+                      <span className="ld-ic">⟲</span> Авто-раскладка
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
         </div>
 
         {!sidebarOpen && (
@@ -2581,7 +2572,7 @@ export default function App() {
         )
       )}
 
-      {showHelp && <HelpModal onClose={() => setShowHelp(false)} />}
+      {showHelp && <HelpModal onClose={() => setShowHelp(false)} boardMode={boardMode} />}
 
       {/* выбор типа после броска связи */}
       {pendingLink && (
@@ -2665,90 +2656,199 @@ export default function App() {
 }
 
 // ── справка: как всё работает ───────────────────────────────────────────────
-function HelpModal(props: { onClose: () => void }) {
+function HelpModal(props: { onClose: () => void; boardMode: boolean }) {
   return (
     <div className="modal-backdrop" onClick={props.onClose}>
       <div className="modal modal-help" onClick={(e) => e.stopPropagation()}>
-        <h2>Как это работает</h2>
+        <h2>Как это работает — {props.boardMode ? "Доска" : "Граф"}</h2>
         <p className="help-lead">
-          Краткая шпаргалка по основным возможностям. Граф строится по задачам
-          GitLab; всё, что меняешь здесь, сразу пишется в GitLab.
+          {props.boardMode ? (
+            <>
+              Краткая шпаргалка по Kanban-доске. Колонки и карточки берутся из
+              задач GitLab; всё, что меняешь здесь, сразу пишется в GitLab.
+            </>
+          ) : (
+            <>
+              Краткая шпаргалка по основным возможностям. Граф строится по задачам
+              GitLab; всё, что меняешь здесь, сразу пишется в GitLab.
+            </>
+          )}
         </p>
         <div className="help-body">
-          <section>
-            <h3>Область</h3>
-            <p>
-              Слева вверху выбираешь <b>группу</b> (со всеми проектами) или
-              отдельный <b>проект</b> — граф строится по его задачам.
-            </p>
-          </section>
-          <section>
-            <h3>Вид / группировка</h3>
-            <p>
-              <b>Граф зависимостей</b> — иерархическая раскладка по связям.
-              Остальные виды (<b>по спринту / метке / исполнителю / проекту /
-              статусу</b>) раскладывают задачи в колонки — удобно планировать.
-            </p>
-          </section>
-          <section>
-            <h3>Раскладка графа</h3>
-            <p>
-              В виде «граф зависимостей» — панель снизу: <b>сверху-вниз</b>,{" "}
-              <b>слева-направо</b> или <b>радиальная</b> (выбранная задача в
-              центре, связанные вокруг). <b>Клик</b> по карточке — открыть её,{" "}
-              <b>перетащить тело</b> — подвинуть (позиции сохраняются; кнопка{" "}
-              <b>⟲ Авто-раскладка</b> сбрасывает). <b>Esc</b> — снять выделение.
-            </p>
-          </section>
-          <section>
-            <h3>Связи</h3>
-            <p>
-              <b>Создать:</b> наведи на карточку → у края появится кнопка-стрелка{" "}
-              <b>↗</b>, потяни от неё к другой карточке (целиться в неё не надо —
-              притянется) → выбери тип. <b>Типы:</b>{" "}
-              <b>⛔ Блокирует</b> (красная стрелка),{" "}
-              <b>⬇ Родитель → дочерняя</b> (фиолетовая стрелка),{" "}
-              <b>🔗 Связана</b> (серый пунктир, без направления).
-            </p>
-            <p>
-              Направление: задача у <b>начала</b> стрелки — главная/раньше (её
-              кладём <b>выше-левее</b>). <b>Сменить тип или удалить</b> — клик по
-              линии связи. На Free в GitLab всё хранится как «relates to», а тип и
-              направление (blocks/родитель) ведёт само приложение; на PRO работают
-              нативные blocks/epic.
-            </p>
-          </section>
-          <section>
-            <h3>Спринты</h3>
-            <p>
-              Спринт = GitLab <b>milestone</b>. Создать новый — кнопка{" "}
-              <b>＋ спринт</b> в фильтрах. Назначить задаче — в её панели справа
-              или перетащив в нужную колонку (вид «по спринту»).
-            </p>
-          </section>
-          <section>
-            <h3>Цвета нод</h3>
-            <p>
-              Левый край — цвет первой метки. <span className="hl-over">Красный фон</span> —
-              просрочено, <span className="hl-soon">жёлтый</span> — срок сегодня/завтра,
-              серая — закрыта. Бейдж со сроком — в шапке ноды; саму дату задаёшь в
-              панели справа (поле <b>«Срок»</b>).
-            </p>
-          </section>
+          {props.boardMode ? (
+            <>
+              <section>
+                <h3>Что такое «Доска»</h3>
+                <p>
+                  <b>Kanban-доска</b> по задачам GitLab. Колонки берутся из{" "}
+                  <b>доски GitLab</b> выбранной области; если доски нет — колонки{" "}
+                  <b>выводятся автоматически</b> из самых частых scoped-меток
+                  (напр. <code>status::</code> / <code>priority::</code>), либо
+                  добавляются вручную кнопкой <b>＋ Список</b>. На GitLab CE
+                  групповые доски — функция EE, поэтому для группы доска может не
+                  подтянуться (тогда показываются авто-колонки или{" "}
+                  <b>Open | Closed</b>).
+                </p>
+              </section>
+              <section>
+                <h3>Колонки</h3>
+                <p>
+                  <b>«Open»</b> — открытые задачи без метки-списка; затем
+                  label-колонки (по доске или меткам); <b>«Closed»</b> — закрытые.
+                </p>
+              </section>
+              <section>
+                <h3>Перетаскивание карточек</h3>
+                <p>
+                  Перетаскивание <b>сразу меняет данные задачи в GitLab</b>: в
+                  label-колонку — ставит её метку и снимает прежнюю; в <b>«Open»</b>{" "}
+                  — снимает метку колонки-источника; в <b>«Closed»</b> — закрывает
+                  задачу; обратно из Closed — переоткрывает.
+                </p>
+              </section>
+              <section>
+                <h3>Scoped-метки</h3>
+                <p>
+                  Метки вида <code>pref::value</code> (напр.{" "}
+                  <code>status::todo</code>) — <b>взаимоисключающие</b> внутри
+                  группы: перенос ставит новую метку группы и снимает прежнюю (одна{" "}
+                  <code>status::</code> за раз).
+                </p>
+              </section>
+              <section>
+                <h3>Несколько досок</h3>
+                <p>
+                  Если у области несколько досок GitLab — <b>селектор доски</b>{" "}
+                  вверху панели доски.
+                </p>
+              </section>
+              <section>
+                <h3>Карточка</h3>
+                <p>
+                  <b>Клик</b> открывает панель справа — там правка{" "}
+                  <b>меток / исполнителя / срока / состояния / описания</b> (как в
+                  графе).
+                </p>
+              </section>
+              <section>
+                <h3>Если перенос «не сработал»</h3>
+                <p>
+                  Всплывает предупреждение — обычно это значит, что в GitLab есть{" "}
+                  <b>две метки с одинаковым именем</b> (групповая и проектная);
+                  снимите лишнюю вручную.
+                </p>
+              </section>
+            </>
+          ) : (
+            <>
+              <section>
+                <h3>Область</h3>
+                <p>
+                  Слева вверху выбираешь <b>группу</b> (со всеми проектами) или
+                  отдельный <b>проект</b> — граф строится по его задачам.
+                </p>
+              </section>
+              <section>
+                <h3>Граф / Доска</h3>
+                <p>
+                  Внизу по центру — сегментный переключатель{" "}
+                  <b>«Граф | Доска»</b> (рядом — кнопки раскладки графа).
+                </p>
+              </section>
+              <section>
+                <h3>Вид / группировка</h3>
+                <p>
+                  <b>Граф зависимостей</b> — иерархическая раскладка по связям.
+                  Остальные виды (<b>по спринту / метке / исполнителю / проекту /
+                  статусу</b>) раскладывают задачи в колонки — удобно планировать.
+                </p>
+              </section>
+              <section>
+                <h3>Инструменты холста</h3>
+                <p>
+                  Слева внизу — выбор инструмента: <b>курсор</b> — выбор и
+                  перетаскивание (<b>V</b>); <b>панорама</b> — таскать холст (
+                  <b>H</b>); <b>лупа</b> — рамкой приблизить область (<b>Z</b>);{" "}
+                  <b>лассо</b> — выделить задачи пачкой (<b>L</b>). Рядом:{" "}
+                  <b>🎯</b> фокус на соседях выбранной, <b>＋</b> новая нода,{" "}
+                  <b>🗺</b> миникарта. Внизу-слева — зум <b>«− % +»</b> и{" "}
+                  <b>⤢</b> «вписать всё в экран».
+                </p>
+              </section>
+              <section>
+                <h3>Раскладка графа</h3>
+                <p>
+                  Внизу по центру — <b>сверху-вниз</b>, <b>слева-направо</b> или{" "}
+                  <b>радиальная</b> (выбранная задача в центре, связанные вокруг).{" "}
+                  <b>Клик</b> по карточке — открыть её, <b>перетащить тело</b> —
+                  подвинуть (позиции сохраняются; кнопка <b>⟲ Авто-раскладка</b>{" "}
+                  сбрасывает). <b>Esc</b> — снять выделение.
+                </p>
+              </section>
+              <section>
+                <h3>Связи</h3>
+                <p>
+                  <b>Создать:</b> наведи на карточку → у края появится
+                  кнопка-стрелка <b>↗</b>, потяни от неё к другой карточке
+                  (целиться в неё не надо — притянется) → выбери тип. <b>Типы:</b>{" "}
+                  <b>⛔ Блокирует</b> (красная стрелка),{" "}
+                  <b>⬇ Родитель → дочерняя</b> (фиолетовая стрелка),{" "}
+                  <b>🔗 Связана</b> (серый пунктир, без направления).
+                </p>
+                <p>
+                  Направление: задача у <b>начала</b> стрелки — главная/раньше (её
+                  кладём <b>выше-левее</b>). <b>Сменить тип или удалить</b> — клик
+                  по линии связи. На Free в GitLab всё хранится как «relates to», а
+                  тип и направление (blocks/родитель) ведёт само приложение; на PRO
+                  работают нативные blocks/epic.
+                </p>
+              </section>
+              <section>
+                <h3>Цвета нод</h3>
+                <p>
+                  Левый край — цвет первой метки.{" "}
+                  <span className="hl-over">Красный фон</span> — просрочено,{" "}
+                  <span className="hl-soon">жёлтый</span> — срок сегодня/завтра,
+                  серая — закрыта. Бейдж со сроком — в шапке ноды; саму дату задаёшь
+                  в панели справа (поле <b>«Срок»</b>).
+                </p>
+              </section>
+              <section>
+                <h3>Спринты</h3>
+                <p>
+                  Спринт = GitLab <b>milestone</b>. Создать новый — кнопка{" "}
+                  <b>＋ спринт</b> в фильтрах. Назначить задаче — в её панели справа
+                  или перетащив в нужную колонку (вид «по спринту»).
+                </p>
+              </section>
+              <section>
+                <h3>Создание</h3>
+                <p>
+                  <b>＋ Задача</b> — новая задача. На выбранной ноде —{" "}
+                  <b>＋ Дочерняя задача</b> (создаст и свяжет). Исполнителя, спринт,
+                  статус и описание меняешь в панели справа.
+                </p>
+              </section>
+            </>
+          )}
           <section>
             <h3>Фильтры</h3>
             <p>
-              Кнопка <b>Фильтры</b> разворачивает панель. Вне фильтра задачи можно{" "}
-              <b>скрывать</b> или <b>затемнять</b> (переключатель). Цифра на
-              кнопке — сколько фильтров активно.
-            </p>
-          </section>
-          <section>
-            <h3>Создание</h3>
-            <p>
-              <b>＋ Задача</b> — новая задача. На выбранной ноде —{" "}
-              <b>＋ Дочерняя задача</b> (создаст и свяжет). Исполнителя, спринт,
-              статус и комментарии меняешь в панели справа.
+              Кнопка <b>Фильтры</b> разворачивает панель (состояние / спринт /
+              метка / исполнитель / даты); поиск и <b>«активные за N дней»</b> тоже
+              фильтруют.{" "}
+              {props.boardMode ? (
+                <>
+                  В режиме «Доска» фильтры тоже применяются — карточки скрываются,
+                  счётчики колонок обновляются.
+                </>
+              ) : (
+                <>
+                  В графе вне фильтра задачи можно <b>скрывать</b> или{" "}
+                  <b>затемнять</b> (переключатель).
+                </>
+              )}{" "}
+              Цифра на кнопке — сколько фильтров активно.
             </p>
           </section>
           <section>
@@ -2775,22 +2875,93 @@ function HelpModal(props: { onClose: () => void }) {
 function LeftToolbar(props: {
   tool: "select" | "pan" | "zoomArea" | "lasso";
   setTool: (t: "select" | "pan" | "zoomArea" | "lasso") => void;
-  onFit: () => void;
   onFocusNeighbors: () => void;
   canFocus: boolean;
   onAddNode: () => void;
   canAddNode: boolean;
-  onExportPng: () => void;
-  exporting: boolean;
   showMiniMap: boolean;
   onToggleMiniMap: () => void;
 }) {
-  const tools = [
-    { k: "select", icon: "⬚", t: "Выбор / перетаскивание (V)" },
-    { k: "pan", icon: "✋", t: "Рука — панорама холста (H)" },
-    { k: "zoomArea", icon: "🔍", t: "Лупа — рамкой приблизить область (Z)" },
-    { k: "lasso", icon: "▢", t: "Лассо — выделить задачи пачкой (L)" },
-  ] as const;
+  // Этап 7: SVG-иконки инструментов (вместо эмодзи) — курсор/панорама/лупа/лассо.
+  const tools: {
+    k: "select" | "pan" | "zoomArea" | "lasso";
+    icon: ReactNode;
+    t: string;
+  }[] = [
+    {
+      k: "select",
+      t: "Выбор / перетаскивание (V)",
+      icon: (
+        <svg width="15" height="15" viewBox="0 0 16 16" aria-hidden>
+          <path
+            d="M3 2l8.6 4.7-3.7 1 2 3.8-1.6.8-2-3.8-2.6 2.8z"
+            fill="currentColor"
+          />
+        </svg>
+      ),
+    },
+    {
+      k: "pan",
+      t: "Панорама холста — перетаскивание (H)",
+      icon: (
+        <svg
+          width="15"
+          height="15"
+          viewBox="0 0 16 16"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.4"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden
+        >
+          <path d="M8 1.6v12.8M1.6 8h12.8" />
+          <path d="M8 1.6 6.4 3.4M8 1.6l1.6 1.8M8 14.4l-1.6-1.8M8 14.4l1.6-1.8M1.6 8l1.8-1.6M1.6 8l1.8 1.6M14.4 8l-1.8-1.6M14.4 8l-1.8 1.6" />
+        </svg>
+      ),
+    },
+    {
+      k: "zoomArea",
+      t: "Лупа — рамкой приблизить область (Z)",
+      icon: (
+        <svg
+          width="15"
+          height="15"
+          viewBox="0 0 16 16"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.6"
+          strokeLinecap="round"
+          aria-hidden
+        >
+          <circle cx="7" cy="7" r="4.3" />
+          <path d="M10.3 10.3 14 14M5.3 7h3.4M7 5.3v3.4" />
+        </svg>
+      ),
+    },
+    {
+      k: "lasso",
+      t: "Лассо — выделить задачи пачкой (L)",
+      icon: (
+        <svg
+          width="15"
+          height="15"
+          viewBox="0 0 16 16"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.4"
+          aria-hidden
+        >
+          <ellipse cx="8" cy="6" rx="6" ry="4" strokeDasharray="2.2 1.8" />
+          <path
+            d="M4.7 9.5c-1 1-1.1 2.2-.3 3 .6.7.5 1.5-.3 2"
+            strokeLinecap="round"
+          />
+          <circle cx="3.9" cy="14.4" r="1.05" fill="currentColor" stroke="none" />
+        </svg>
+      ),
+    },
+  ];
   return (
     <Panel position="top-left">
       <div className="left-toolbar">
@@ -2808,9 +2979,6 @@ function LeftToolbar(props: {
         </div>
         <span className="lt-sep" />
         <div className="lt-group">
-          <button title="Вписать всё в экран" onClick={props.onFit}>
-            ⤢
-          </button>
           <button
             title="Фокус на выбранной задаче и её связях"
             onClick={props.onFocusNeighbors}
@@ -2824,13 +2992,6 @@ function LeftToolbar(props: {
             disabled={!props.canAddNode}
           >
             ＋
-          </button>
-          <button
-            title="Экспорт графа в PNG"
-            onClick={props.onExportPng}
-            disabled={props.exporting}
-          >
-            🖼
           </button>
           <button
             className={props.showMiniMap ? "on" : ""}
@@ -2964,7 +3125,15 @@ function ColumnHeaders({
           }`}
           style={{
             left: vp.x + h.x * vp.zoom,
-            width: (h.collapsed ? COLLAPSED_W : NODE_W) * vp.zoom,
+            // ширину капим до «шаг колонки − зазор», чтобы шапки НЕ слипались
+            // на отдалении (шаг = COL_W у обычной, COLLAPSED_W у свёрнутой).
+            width: Math.max(
+              8,
+              Math.min(
+                (h.collapsed ? COLLAPSED_W : NODE_W) * vp.zoom,
+                (h.collapsed ? COLLAPSED_W : COL_W) * vp.zoom - 8
+              )
+            ),
           }}
           onClick={() => onToggle(h.key)}
           title={
@@ -2985,12 +3154,12 @@ function ColumnHeaders({
 // Этап 12 (D11): компонент дорожек KanbanLanes удалён (откат Этапа 11). Холст —
 // чистый просмотр; настоящая Kanban теперь в режиме «Доска» (Board.tsx).
 
-// ── контрол масштаба (как в Figma/Miro): − [%] + ────────────────────────────
-// Этап 7 (консолидация контролов): низ-лево = ТОЛЬКО инкрементальный зум.
-// «Вписать в экран» (Fit) живёт в левой панели инструментов — не дублируем.
+// ── контрол масштаба (как в Figma/Miro): − [%] + ⤢ ───────────────────────────
+// Этап 7 (консолидация контролов): низ-лево = инкрементальный зум + «вписать всё
+// в экран» (Fit) рядом — привычное место для навигации по холсту.
 function ZoomControl() {
   const { zoom } = useViewport(); // реактивно — процент обновляется и при зуме колёсиком
-  const { zoomIn, zoomOut, zoomTo } = useReactFlow();
+  const { zoomIn, zoomOut, zoomTo, fitView } = useReactFlow();
   const pct = Math.round(zoom * 100);
   return (
     <Panel position="bottom-left">
@@ -3007,6 +3176,14 @@ function ZoomControl() {
         </button>
         <button onClick={() => zoomIn({ duration: 150 })} title="Приблизить">
           +
+        </button>
+        <span className="zoom-sep" />
+        <button
+          className="zoom-fit"
+          onClick={() => fitView({ duration: 300, padding: 0.15, maxZoom: 1 })}
+          title="Вписать всё в экран"
+        >
+          ⤢
         </button>
       </div>
     </Panel>

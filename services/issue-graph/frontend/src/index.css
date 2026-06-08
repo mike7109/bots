@@ -886,9 +886,9 @@ button.counts-top.warn {
   cursor: pointer;
   user-select: none;
   transition: background 0.12s, border-color 0.12s;
-  /* F4: floor по ширине — на отдалении inline width (NODE_W*zoom) сжимал шапку,
-     и имя исполнителя обрезалось до 1 символа. Свёрнутая колонка floor снимает. */
-  min-width: 116px;
+  /* ширину задаёт inline-стиль (капится до «шаг колонки − зазор»), поэтому floor
+     по ширине НЕ ставим — иначе шапки слипаются на отдалении. Полное имя — в title. */
+  min-width: 0;
 }
 .col-header:hover {
   background: rgba(224, 228, 255, 0.92);
@@ -901,9 +901,7 @@ button.counts-top.warn {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  /* F4: на отдалении заголовок ужимался до 1 символа — даём имени читаемый
-     минимум, чтобы оно не схлопывалось (свёрнутая колонка отменяет ниже). */
-  min-width: 84px;
+  min-width: 0; /* даём заголовку ужиматься с многоточием (полное имя — в title) */
 }
 .col-header .ch-count {
   flex-shrink: 0;
@@ -1164,12 +1162,6 @@ button.counts-top.warn {
     background-position: 200% 0;
   }
 }
-.board-toggle.on {
-  background: var(--accent);
-  color: #fff;
-  border-color: var(--accent);
-}
-
 /* ── панель пресетов раскладки (как в Obsidian) ── */
 .layout-dock {
   display: flex;
@@ -1219,6 +1211,59 @@ button.counts-top.warn {
 .layout-dock .ld-reset:hover {
   background: #eef0ff;
   color: var(--accent-d);
+}
+
+/* ── нижний левый док холста: сегментный «Граф | Доска» + кнопки раскладки.
+   Рендерится поверх холста в обоих режимах, сидит над зум-контролом (низ-лево),
+   чтобы не перекрывать его. pointer-events:auto — клики проходят, а пустое место
+   дока не блокирует холст под ним. ── */
+.canvas-dock {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 14px;
+  z-index: 7;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  pointer-events: auto;
+}
+
+/* сегментная пилюля переключателя режима: контейнер + два сегмента, активный
+   залит акцентом, неактивный приглушён */
+.mode-toggle {
+  display: inline-flex;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  padding: 3px;
+  box-shadow: 0 3px 12px rgba(20, 20, 50, 0.14);
+}
+.mode-toggle .mt-seg {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+  padding: 6px 13px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+.mode-toggle .mt-seg:hover {
+  color: var(--ink);
+}
+.mode-toggle .mt-seg.on {
+  background: var(--accent);
+  color: #fff;
+}
+.mode-toggle .mt-ic {
+  font-size: 13px;
+  line-height: 1;
 }
 
 /* связи кликабельны (удаление) */
@@ -2990,9 +3035,12 @@ button.counts-top.warn {
   color: #f0a9a4;
 }
 
-/* ── Этап 7: левая панель инструментов (курсор/камера) + команды холста ── */
+/* ── Этап 7: левая панель инструментов (курсор/камера) + команды холста ──
+   Горизонтальный ряд, прижатый к левому краю холста (margin-left снимает дефолтный
+   отступ панели ReactFlow). */
 .left-toolbar {
   display: flex;
+  flex-direction: row;
   align-items: center;
   gap: 2px;
   background: var(--panel);
@@ -3003,10 +3051,13 @@ button.counts-top.warn {
      чтобы он не перекрывал заголовки и пилюли оставались кликабельны. В графовом
      виде заголовков нет — лишний отступ сверху безвреден. */
   margin-top: 40px;
+  /* прижимаем к левому краю — гасим дефолтный margin панели ReactFlow */
+  margin-left: -7px;
   box-shadow: 0 2px 8px rgba(20, 20, 50, 0.12);
 }
 .left-toolbar .lt-group {
   display: flex;
+  flex-direction: row;
   gap: 2px;
 }
 .left-toolbar button {
