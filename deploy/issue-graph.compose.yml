@@ -1,0 +1,31 @@
+# Issue Graph — продакшн-развёртка. Образ собирается в CI и публикуется в GHCR
+# (ghcr.io/mike7109/issue-graph:latest). Локальная сборка НЕ нужна.
+#
+# Деплой/обновление (из этой папки):
+#   docker compose -f issue-graph.compose.yml pull
+#   docker compose -f issue-graph.compose.yml up -d
+# `name:` фиксирует имя проекта — флаг -p не нужен, ps/logs видят контейнер.
+# Секреты — в issue-graph.env (НЕ в git; см. issue-graph.env.example).
+name: issue-graph
+services:
+  issue-graph:
+    image: ghcr.io/mike7109/issue-graph:latest
+    container_name: issue-graph
+    restart: unless-stopped
+    env_file: ./issue-graph.env
+    volumes:
+      - issue-graph-data:/data        # /data/.gl_config.json + слой связей (SQLite)
+    networks: [confluence_backend, gitlab-notify_default]
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=confluence_backend
+      - "traefik.http.routers.issuegraph.rule=Host(`graf.fakspro.ru`)"
+      - traefik.http.routers.issuegraph.entrypoints=websecure_443
+      - traefik.http.routers.issuegraph.tls=true
+      - traefik.http.routers.issuegraph.tls.certresolver=le
+      - traefik.http.services.issuegraph.loadbalancer.server.port=8000
+networks:
+  confluence_backend: {external: true}
+  gitlab-notify_default: {external: true}
+volumes:
+  issue-graph-data:
