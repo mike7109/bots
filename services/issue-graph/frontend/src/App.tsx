@@ -1446,15 +1446,6 @@ export default function App() {
     );
   }, [selectedId, neighborhood]);
 
-  // ＋ нода на холсте: открыть форму создания «с нуля» (без родителя). Позицию в
-  // центр вьюпорта поставит handleCreated (D3, screenToFlowPosition) после ответа.
-  const addNodeOnCanvas = useCallback(() => {
-    setSelectedId(null);
-    setParentNode(null);
-    setCreating(true);
-    setSidebarOpen(true);
-  }, []);
-
   // ── лупа (zoom-to-area): тянем рамку при tool='zoomArea', по отпусканию
   // переводим screen-точки в координаты холста и fitBounds в выделенную область,
   // затем авто-возврат к инструменту выбора. Рамку рисует штатный
@@ -2341,8 +2332,6 @@ export default function App() {
               setTool={setTool}
               onFocusNeighbors={focusNeighbors}
               canFocus={!!selectedId}
-              onAddNode={addNodeOnCanvas}
-              canAddNode={!!data}
               showMiniMap={showMiniMap}
               onToggleMiniMap={() => setShowMiniMap((v) => !v)}
             />
@@ -2890,8 +2879,6 @@ function LeftToolbar(props: {
   setTool: (t: "select" | "pan" | "zoomArea" | "lasso") => void;
   onFocusNeighbors: () => void;
   canFocus: boolean;
-  onAddNode: () => void;
-  canAddNode: boolean;
   showMiniMap: boolean;
   onToggleMiniMap: () => void;
 }) {
@@ -2998,13 +2985,6 @@ function LeftToolbar(props: {
             disabled={!props.canFocus}
           >
             🎯
-          </button>
-          <button
-            title="Новая задача в центр холста"
-            onClick={props.onAddNode}
-            disabled={!props.canAddNode}
-          >
-            ＋
           </button>
           <button
             className={props.showMiniMap ? "on" : ""}
