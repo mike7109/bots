@@ -18,7 +18,7 @@ Three independent caps, evaluated on every `record()`; tripping on ANY:
 
   GLOBAL      total sends in the last `window_s` seconds        > max_global
   PER-TARGET  sends to one target_key in `target_window_s`      > max_per_target
-  DUPLICATE   identical content (by hash) in `window_s`         > max_duplicate
+  DUPLICATE   identical content to one target_key in `window_s` > max_duplicate
 
 State that must survive a restart (the tripped flag + when/why) is read/written
 through injected callables (`get_tripped`/`set_tripped`) so the persistence layer
@@ -169,11 +169,15 @@ class SendGuard:
                           f"{self.target_window_s}с (порог {self.max_per_target})")
                 return
 
-            # DUPLICATE: identical content in the last window_s.
-            dup_n = sum(1 for ts, _, ch in self._events if ch == chash and ts >= g_cut)
+            # DUPLICATE: identical content to the SAME target in the last window_s.
+            # Per-target (not global) so one logical message fanned out to many
+            # recipients — e.g. a multi-assignee reminder DMed to each — is NOT a
+            # duplicate flood; only the same text hammering one target is.
+            dup_n = sum(1 for ts, tk, ch in self._events
+                        if tk == str(target_key) and ch == chash and ts >= g_cut)
             if dup_n > self.max_duplicate:
-                self.trip(f"дубликаты: одно и то же сообщение {dup_n} раз за "
-                          f"{self.window_s}с (порог {self.max_duplicate})")
+                self.trip(f"дубликаты на «{target_key}»: одно и то же сообщение "
+                          f"{dup_n} раз за {self.window_s}с (порог {self.max_duplicate})")
                 return
         except Exception:                       # noqa: BLE001 — recording must never break delivery
             log.exception("SendGuard.record() failed; ignoring")

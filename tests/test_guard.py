@@ -87,13 +87,25 @@ def test_trips_on_per_target_cap():
 def test_trips_on_duplicate_cap():
     st, clk = State(), FakeClock()
     g = make_guard(st, clk, max_duplicate=2, max_global=99, max_per_target=99)
-    # same content, but distinct targets so per-target never fires
+    # same content to the SAME target: a real loop hammering one recipient.
     g.record("t1", "identical")
-    g.record("t2", "identical")
+    g.record("t1", "identical")
     assert g.blocked() is False               # 2 == cap
-    g.record("t3", "identical")               # 3rd identical -> over duplicate
+    g.record("t1", "identical")               # 3rd identical to t1 -> over duplicate
     assert g.blocked() is True
     assert "дубликат" in st.value["reason"].lower()
+
+
+def test_duplicate_cap_is_per_target():
+    # One logical message fanned out to several recipients (e.g. a multi-assignee
+    # overdue reminder DMed to each) must NOT look like a duplicate flood: the
+    # duplicate cap counts identical content to the SAME target, not globally.
+    st, clk = State(), FakeClock()
+    g = make_guard(st, clk, max_duplicate=2, max_global=99, max_per_target=99)
+    for mxid in ("dm:a", "dm:b", "dm:c", "dm:d"):
+        g.record(mxid, "identical")           # 4 recipients, 1 copy each
+    assert g.blocked() is False               # never tripped
+    assert st.trips == []
 
 
 def test_window_pruning_avoids_false_trip():
