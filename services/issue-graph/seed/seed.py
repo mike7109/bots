@@ -129,9 +129,9 @@ def ensure_project_board(project_id: int, name: str, list_label_ids: list[int]) 
     # текущие списки доски → какие label_id уже представлены
     lr = api("GET", f"/projects/{project_id}/boards/{board['id']}/lists")
     existing = {
-        (l.get("label") or {}).get("id")
-        for l in (lr.json() if lr.status_code == 200 else [])
-        if l.get("label")
+        (ls.get("label") or {}).get("id")
+        for ls in (lr.json() if lr.status_code == 200 else [])
+        if ls.get("label")
     }
     for lid in list_label_ids:
         if lid in existing:
