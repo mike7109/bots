@@ -82,7 +82,67 @@ def ensure_member(group_id: int, user_id: int) -> None:
 
 
 def ensure_label(project_id: int, name: str, color: str) -> None:
+    """Создать метку на уровне ПРОЕКТА (идемпотентно — 409 при существующей)."""
     api("POST", f"/projects/{project_id}/labels", json={"name": name, "color": color})
+
+
+def ensure_group_label(group_id: int, name: str, color: str) -> dict:
+    """Создать/найти метку на уровне ГРУППЫ (идемпотентно).
+
+    Workflow-метки `status::*` живут ТОЛЬКО на уровне группы. Если завести их
+    ещё и на проектах, снятие метки по имени (add_labels/remove_labels в PUT
+    issue) станет неоднозначным и сломает перемещение карточек на доске.
+    """
+    r = api("GET", f"/groups/{group_id}/labels", params={"per_page": 100})
+    for la in (r.json() if r.status_code == 200 else []):
+        if la["name"] == name:
+            return la
+    r = api("POST", f"/groups/{group_id}/labels", json={"name": name, "color": color})
+    # 409 = уже существует (гонка/повтор) — добираем из GET
+    if r.status_code == 409:
+        r2 = api("GET", f"/groups/{group_id}/labels", params={"per_page": 100})
+        for la in (r2.json() if r2.status_code == 200 else []):
+            if la["name"] == name:
+                return la
+    return ok(r)
+
+
+def ensure_project_board(project_id: int, name: str, list_label_ids: list[int]) -> dict:
+    """Создать/найти доску ПРОЕКТА «name» со списками по меткам (идемпотентно).
+
+    Проектные доски в CE создаются через REST (POST /projects/:id/boards).
+    Группах доски через REST в CE недоступны (EE-only) — см. seed/group_board.rb.
+    Списки добавляются только недостающие, существующие не дублируются.
+    """
+    r = api("GET", f"/projects/{project_id}/boards", params={"per_page": 100})
+    board = None
+    for b in (r.json() if r.status_code == 200 else []):
+        if b["name"] == name:
+            board = b
+            break
+    if board is None:
+        board = ok(api("POST", f"/projects/{project_id}/boards", json={"name": name}))
+        print(f"  created project board '{name}' (id={board['id']})")
+    else:
+        print(f"  project board '{name}' exists (id={board['id']})")
+
+    # текущие списки доски → какие label_id уже представлены
+    lr = api("GET", f"/projects/{project_id}/boards/{board['id']}/lists")
+    existing = {
+        (l.get("label") or {}).get("id")
+        for l in (lr.json() if lr.status_code == 200 else [])
+        if l.get("label")
+    }
+    for lid in list_label_ids:
+        if lid in existing:
+            continue
+        rr = api("POST", f"/projects/{project_id}/boards/{board['id']}/lists",
+                 json={"label_id": lid})
+        if rr.status_code < 300:
+            print(f"    + list for label_id={lid}")
+        elif rr.status_code not in (409, 400):
+            ok(rr)
+    return board
 
 
 def ensure_milestone(group_id: int, title: str) -> dict:
@@ -120,10 +180,32 @@ def link_issues(pid: int, iid: int, tgt_project: int, tgt_iid: int, link_type: s
 
 
 # ── модель данных стенда ────────────────────────────────────────────────────
+#
+# Доски (boards) — две демо-доски «Workflow»:
+#   • ПРОЕКТНАЯ доска webapp со списками priority::high/medium/low — создаётся
+#     ниже через REST (ensure_project_board); это воспроизводимо в CE.
+#   • ГРУППОВАЯ доска со списками status::* — REST в CE НЕДОСТУПЕН (EE-only:
+#     POST /groups/:id/boards отдаёт 404 в этом GitLab v19 CE, enterprise:false).
+#     Создаётся отдельным rails-скриптом seed/group_board.rb:
+#         docker cp seed/group_board.rb ig-gitlab:/tmp/group_board.rb
+#         docker exec ig-gitlab gitlab-rails runner /tmp/group_board.rb
+#     GET /groups/:id/boards при этом доску ВОЗВРАЩАЕТ (читать можно, создавать
+#     нельзя). Скрипт идемпотентен и не дублирует доску/списки.
+
+# Проектные метки (НЕ содержат status::* — те живут только на уровне группы,
+# см. GROUP_LABELS). priority::* используются как списки проектной доски.
 LABELS = [
     ("frontend", "#1f78d1"), ("backend", "#5cb85c"), ("infra", "#8e44ad"),
     ("bug", "#d9534f"), ("feature", "#0e8a16"), ("tech-debt", "#fbca04"),
-    ("priority::high", "#b60205"), ("priority::low", "#c2e0c6"),
+    ("priority::high", "#b60205"), ("priority::medium", "#fbca04"),
+    ("priority::low", "#c2e0c6"),
+]
+
+# Workflow-метки рабочего процесса — ТОЛЬКО на уровне группы (колонки доски).
+# Отдельные цвета, чтобы колонки доски визуально различались.
+GROUP_LABELS = [
+    ("status::todo", "#6699cc"), ("status::doing", "#33aa55"),
+    ("status::review", "#cc9933"), ("status::blocked", "#cc3333"),
 ]
 USERS = [("alice", "Alice Dev"), ("bob", "Bob Builder"), ("carol", "Carol Ops")]
 MILESTONES = ["Sprint 1", "Sprint 2", "Q3: Платёжный модуль"]
@@ -161,12 +243,27 @@ def main() -> None:
 
     milestones = [ensure_milestone(gid, t) for t in MILESTONES]
 
+    # Workflow-метки status::* — только на уровне ГРУППЫ (колонки доски).
+    for ln, col in GROUP_LABELS:
+        ensure_group_label(gid, ln, col)
+    print(f"  group labels: {', '.join(n for n, _ in GROUP_LABELS)}")
+
     projects: dict[str, dict] = {}
     for key, (path, name) in PROJECTS.items():
         p = ensure_project(gid, path, name)
         projects[key] = p
         for ln, col in LABELS:
             ensure_label(p["id"], ln, col)
+
+    # Проектная доска «Workflow» (webapp) со списками priority::* — REST в CE.
+    web = projects["web"]
+    web_labels = ok(api("GET", f"/projects/{web['id']}/labels",
+                        params={"per_page": 100}))
+    by_name = {la["name"]: la for la in web_labels}
+    prio_ids = [by_name[n]["id"] for n in
+                ("priority::high", "priority::medium", "priority::low")
+                if n in by_name]
+    ensure_project_board(web["id"], "Workflow", prio_ids)
 
     # создаём issue, запоминаем (project_key,title) -> issue
     created: dict[str, dict] = {}
@@ -194,6 +291,11 @@ def main() -> None:
             print(f"  {title} -> {rt}: {res}")
 
     print(f"\nDONE. Группа: {URL}/groups/{GROUP}/-/issues")
+    print("Проектная доска (REST):  "
+          f"{URL}/{GROUP}/{PROJECTS['web'][0]}/-/boards")
+    print("Групповая доска (EE-only через REST) — создать rails-скриптом:")
+    print("  docker cp seed/group_board.rb ig-gitlab:/tmp/group_board.rb && \\")
+    print("  docker exec ig-gitlab gitlab-rails runner /tmp/group_board.rb")
 
 
 if __name__ == "__main__":
