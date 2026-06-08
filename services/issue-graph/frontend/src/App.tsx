@@ -271,6 +271,31 @@ export default function App() {
   const [daysActive, setDaysActive] = useState<number>(
     () => SAVED_VIEW.days ?? 0
   );
+  // Закрытые пользователем плашки над холстом (× на баннере). Ключ привязан к
+  // области (overload:group:2 / mine:project:5) — закрыл для graphlab, в другой
+  // (тоже перегруженной) области плашка покажется снова. Помним между сессиями.
+  const [dismissed, setDismissed] = useState<Set<string>>(() => {
+    try {
+      return new Set<string>(
+        JSON.parse(localStorage.getItem("ig.dismissed") || "[]")
+      );
+    } catch {
+      return new Set<string>();
+    }
+  });
+  const dismissBanner = useCallback((key: string) => {
+    setDismissed((prev) => {
+      if (prev.has(key)) return prev;
+      const next = new Set(prev);
+      next.add(key);
+      try {
+        localStorage.setItem("ig.dismissed", JSON.stringify([...next]));
+      } catch {
+        /* приватный режим / переполнение — не критично */
+      }
+      return next;
+    });
+  }, []);
 
   // фильтры (Фаза 2) — стартовые значения берём из сохранённого вида (URL/LS)
   const [search, setSearch] = useState(SAVED_VIEW.search ?? "");
@@ -1664,6 +1689,10 @@ export default function App() {
   // (критерий приёмки ROADMAP). Считаем по загруженному набору, не по видимым.
   const OVERLOAD_THRESHOLD = 150;
   const overloaded = !!data && data.meta.issue_count > OVERLOAD_THRESHOLD;
+  // ключ закрытия плашек привязан к текущей области (см. dismissBanner)
+  const scopeKey = scope ? `${scope.kind}:${scope.id}` : "none";
+  const mineDismissed = dismissed.has(`mine:${scopeKey}`);
+  const overloadDismissed = dismissed.has(`overload:${scopeKey}`);
   // исполнители: из задач графа (доступно всегда, без админских прав) + участники
   const assigneeOptions = (() => {
     const m = new Map<string, { id: number | null; name: string }>();
@@ -2152,7 +2181,7 @@ export default function App() {
           {data && !boardMode && (
             <div className="canvas-banners">
               {/* «Мои задачи»: видимая плашка + быстрый выход в общий вид */}
-              {myTasks && (
+              {myTasks && !mineDismissed && (
                 <div className="cv-banner mine">
                   <span className="cb-ic">⭐</span>
                   <span className="cb-text">
@@ -2165,11 +2194,21 @@ export default function App() {
                   >
                     показать все
                   </button>
+                  <button
+                    className="cb-close"
+                    onClick={() => dismissBanner(`mine:${scopeKey}`)}
+                    title="Скрыть плашку"
+                    aria-label="Скрыть плашку"
+                  >
+                    ✕
+                  </button>
                 </div>
               )}
 
-              {/* «слишком много — сузьте»: порог перегруза issue_count > 150 */}
-              {overloaded && (
+              {/* «слишком много — сузьте»: порог перегруза issue_count > 150.
+                  × скрывает плашку (и парный хинт «активные за N дней») для этой
+                  области; индикатор перегруза остаётся в счётчике справа сверху. */}
+              {overloaded && !overloadDismissed && (
                 <div className="cv-banner warn">
                   <span className="cb-ic">⚠</span>
                   <span className="cb-text">
@@ -2191,6 +2230,14 @@ export default function App() {
                       Выбрать фильтр
                     </button>
                   </span>
+                  <button
+                    className="cb-close"
+                    onClick={() => dismissBanner(`overload:${scopeKey}`)}
+                    title="Скрыть предупреждение"
+                    aria-label="Скрыть предупреждение"
+                  >
+                    ✕
+                  </button>
                 </div>
               )}
 
@@ -2211,7 +2258,8 @@ export default function App() {
                   </button>
                 </div>
               ) : (
-                overloaded && (
+                overloaded &&
+                !overloadDismissed && (
                   <div className="cv-banner days hint">
                     <span className="cb-ic">🕘</span>
                     <span className="cb-text">
@@ -2230,9 +2278,14 @@ export default function App() {
           {/* Этап 12 (D8): режим «Доска» — HTML-колонки вместо ReactFlow-холста.
               Карточки берём из data.nodes (там labels/state/assignees/due/iid).
               Клик по карточке открывает ту же правую панель (selectedId). */}
+          {/* Item 5: доска уважает ТЕ ЖЕ фильтры, что и граф — отдаём в BoardView
+              только прошедшие visibleIds ноды (поиск + панель «Фильтры» +
+              «активные за N дней»). Счётчики колонок считаются по отфильтрованному
+              набору. Логика «поиск-как-навигация» — только в граф-режиме, её не
+              трогаем. */}
           {boardMode && data ? (
             <BoardView
-              nodes={data.nodes}
+              nodes={data.nodes.filter((n) => visibleIds.has(n.id))}
               boards={boardsData}
               boardsLoading={boardsLoading}
               graphLoading={loading}

@@ -28,6 +28,55 @@ function scopedPrefix(name: string): string | null {
   return i > 0 ? name.slice(0, i) : null;
 }
 
+// Item 4: авто-вывод label-колонок при отсутствии доски GitLab.
+// Сканируем метки задач, ищем scoped-имена ("pref::value"), группируем по
+// префиксу и выбираем самую представленную группу (по числу задач, имеющих
+// метку этой группы). Возвращаем её значения как колонки в осмысленном порядке.
+function deriveScopedColumns(nodes: GNode[]): { label: string; color: string | null }[] {
+  // pref → (value → {count, color}); count = число открытых задач с этой меткой
+  const groups = new Map<string, Map<string, { count: number; color: string | null }>>();
+  // pref → множество задач (по id), у которых есть метка этой группы — для веса
+  const groupNodes = new Map<string, Set<string>>();
+  for (const n of nodes) {
+    if (n.type !== "issue" || n.state === "closed") continue; // колонки = для открытых
+    for (const l of n.labels) {
+      const pref = scopedPrefix(l.name);
+      if (!pref) continue;
+      let vals = groups.get(pref);
+      if (!vals) groups.set(pref, (vals = new Map()));
+      const cur = vals.get(l.name);
+      if (cur) cur.count++;
+      else vals.set(l.name, { count: 1, color: l.color });
+      let gn = groupNodes.get(pref);
+      if (!gn) groupNodes.set(pref, (gn = new Set()));
+      gn.add(n.id);
+    }
+  }
+  if (!groups.size) return [];
+  // выбрать префикс с максимальным числом охваченных задач (при равенстве —
+  // больше различных значений, затем алфавит для детерминизма)
+  let bestPref: string | null = null;
+  let best = { nodes: -1, vals: -1, pref: "" };
+  for (const [pref, vals] of groups) {
+    const nodesN = groupNodes.get(pref)?.size ?? 0;
+    const valsN = vals.size;
+    if (
+      nodesN > best.nodes ||
+      (nodesN === best.nodes && valsN > best.vals) ||
+      (nodesN === best.nodes && valsN === best.vals && pref < best.pref)
+    ) {
+      best = { nodes: nodesN, vals: valsN, pref };
+      bestPref = pref;
+    }
+  }
+  if (!bestPref) return [];
+  const vals = groups.get(bestPref)!;
+  // порядок колонок: по убыванию числа задач, затем по имени (стабильно)
+  return [...vals.entries()]
+    .sort((a, b) => b[1].count - a[1].count || a[0].localeCompare(b[0]))
+    .map(([label, v]) => ({ label, color: v.color }));
+}
+
 // Срок-бейдж: тот же расчёт, что в IssueNode (overdue/soon/обычный).
 function dueClass(due: string | null, closed: boolean): "overdue" | "soon" | "none" {
   if (!due || closed) return "none";
@@ -91,6 +140,15 @@ export function BoardView({
   const [overKey, setOverKey] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  // Item 4: при отсутствии доски и пустых ручных колонках авто-выводим
+  // label-колонки из самой представленной scoped-группы меток задач.
+  const autoCols = useMemo(
+    () => (!board && manualCols.length === 0 ? deriveScopedColumns(nodes) : []),
+    [board, manualCols.length, nodes]
+  );
+  // признак «колонки выведены автоматически» — для подсказки/копий
+  const autoDerived = !board && manualCols.length === 0 && autoCols.length > 0;
+
   // ── колонки доски: Open + label-колонки (по порядку) + Closed (D8) ──
   const columns = useMemo<BoardCol[]>(() => {
     const cols: BoardCol[] = [];
@@ -108,9 +166,12 @@ export function BoardView({
       if (!board.hide_closed)
         cols.push({ key: CLOSED_KEY, title: "Closed", color: null, label: null, kind: "closed" });
     } else {
-      // фолбэк: Open | (ручные метки) | Closed
+      // фолбэк: Open | (ручные метки ⟶ при их отсутствии авто-метки) | Closed.
+      // Ручные колонки имеют приоритет: как только пользователь добавил список,
+      // авто-вывод отключается (manualCols.length становится > 0).
       cols.push({ key: OPEN_KEY, title: "Open", color: null, label: null, kind: "open" });
-      for (const m of manualCols)
+      const labelCols = manualCols.length ? manualCols : autoCols;
+      for (const m of labelCols)
         cols.push({
           key: m.label,
           title: m.label,
@@ -121,13 +182,29 @@ export function BoardView({
       cols.push({ key: CLOSED_KEY, title: "Closed", color: null, label: null, kind: "closed" });
     }
     return cols;
-  }, [board, manualCols]);
+  }, [board, manualCols, autoCols]);
 
   // набор имён меток-списков (для определения «Open = без меток-списков»)
   const listLabels = useMemo(
     () => new Set(columns.filter((c) => c.label).map((c) => c.label as string)),
     [columns]
   );
+
+  // порядок label-колонок (имена) — единый источник для byCol и проверки переезда
+  const labelOrder = useMemo(
+    () => columns.filter((c) => c.label).map((c) => c.label as string),
+    [columns]
+  );
+
+  // В какую колонку (по ключу) попадёт нода при текущих columns — ТА ЖЕ логика,
+  // что и в byCol. Используется и для раскладки, и для проверки «переезд удался»
+  // (Item 3). Closed = закрытые; первая подходящая label-метка; иначе Open.
+  function colKeyOf(n: GNode): string {
+    if (n.state === "closed") return CLOSED_KEY;
+    const names = new Set(n.labels.map((l) => l.name));
+    const hit = labelOrder.find((ln) => names.has(ln)); // первая подходящая
+    return hit ?? OPEN_KEY;
+  }
 
   // ── раскладка задач по колонкам (D9) ──
   // Closed = закрытые; label-колонка = открытые с этой меткой (в ПЕРВУЮ
@@ -136,20 +213,14 @@ export function BoardView({
   const byCol = useMemo(() => {
     const m = new Map<string, GNode[]>();
     for (const c of columns) m.set(c.key, []);
-    const labelOrder = columns.filter((c) => c.label).map((c) => c.label as string);
     for (const n of nodes) {
       if (n.type !== "issue") continue;
-      if (n.state === "closed") {
-        m.get(CLOSED_KEY)?.push(n); // если Closed скрыта — карточка просто не видна
-        continue;
-      }
-      const names = new Set(n.labels.map((l) => l.name));
-      const hit = labelOrder.find((ln) => names.has(ln)); // первая подходящая
-      if (hit) m.get(hit)?.push(n);
-      else m.get(OPEN_KEY)?.push(n);
+      m.get(colKeyOf(n))?.push(n);
     }
     return m;
-  }, [columns, nodes]);
+    // colKeyOf — стабильная по columns/labelOrder функция; зависимости явные
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [columns, nodes, labelOrder]);
 
   // ── drag → PATCH (D10) ──
   async function moveTo(node: GNode, col: BoardCol) {
@@ -183,7 +254,6 @@ export function BoardView({
       const target = col.label as string;
       if (node.state !== "closed") {
         const names = new Set(node.labels.map((l) => l.name));
-        const labelOrder = columns.filter((c) => c.label).map((c) => c.label as string);
         const cur = labelOrder.find((ln) => names.has(ln));
         if (cur === target) return; // уже в этой колонке
       }
@@ -205,7 +275,6 @@ export function BoardView({
 
     // снять метку колонки-источника: только если источник — label-колонка списка
     function removeFromSource(n: GNode): string[] {
-      const labelOrder = columns.filter((c) => c.label).map((c) => c.label as string);
       const names = new Set(n.labels.map((l) => l.name));
       const cur = labelOrder.find((ln) => names.has(ln));
       return cur ? [cur] : [];
@@ -216,7 +285,23 @@ export function BoardView({
     try {
       const updated = await api.patchIssue(pid, iid, body);
       applyPatched(updated); // оптимистично: карточка переедет (byCol зависит от nodes)
-      setToast(label);
+      // Item 3: best-effort проверка, что переезд реально «взял». PATCH снимает
+      // метки ПО ИМЕНИ; если в GitLab две метки с одинаковым именем (групповая
+      // vs проектная), remove-by-name может снять не ту, и метка-источник
+      // останется — карточка тогда вернётся в исходную колонку. Пересчитываем
+      // целевую колонку для ОБНОВЛЁННОЙ ноды той же логикой, что и byCol.
+      // Ограничение: у фронта нет id меток (только имена), полностью
+      // disambiguate-ить дубли он не может — отсюда лишь предупреждение, без
+      // авто-повтора.
+      const landed = colKeyOf(updated);
+      if (landed !== col.key) {
+        setToast(
+          "Переезд мог не сработать: возможно, в GitLab есть две метки с одинаковым" +
+            " именем (групповая и проектная). Снимите лишнюю метку вручную."
+        );
+      } else {
+        setToast(label);
+      }
     } catch (e) {
       setToast("Не удалось перенести: " + e);
     } finally {
@@ -268,7 +353,9 @@ export function BoardView({
         )}
         {!board && (
           <span className="bv-hint">
-            доски GitLab не найдены — колонки можно добавить вручную
+            {autoDerived
+              ? "доски GitLab не найдены — колонки выведены автоматически из меток (можно изменить вручную)"
+              : "доски GitLab не найдены — колонки можно добавить вручную"}
           </span>
         )}
       </div>
