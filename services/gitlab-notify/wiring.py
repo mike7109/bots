@@ -43,6 +43,10 @@ def build_context() -> AppContext:
     settings = Settings(store)   # schedule defaults are built-in; admin panel overrides
     settings.seed_conn()         # one-time: env -> DB; afterwards admin panel is authoritative
     renderer = Renderer(HERE / "templates", identity=identity, store=store)
+    # Label-display whitelist: templates call display_labels(labels) to honour
+    # the admin "which 🏷 to show" setting. Registered here (not in botkit) so the
+    # generic renderer stays settings-agnostic; reads the DB live on each render.
+    renderer.env.globals["display_labels"] = settings.display_labels
 
     # Matrix homeserver/token come from settings (DB; seeded from env once) so
     # they're admin-managed; not required at boot — the panel configures them.

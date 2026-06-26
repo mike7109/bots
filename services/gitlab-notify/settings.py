@@ -390,6 +390,100 @@ class Settings:
         self.store.set_state(_KIND, f"rule:{event}", cur)
         return cur
 
+    # --- label display whitelist (which 🏷 chips appear in messages) ------
+    # When enabled with a non-empty allow-list, only labels in the list are
+    # shown on issue messages and digest items (templates call display_labels()).
+    # Disabled OR an empty list -> show everything (the prior behaviour), so the
+    # feature is opt-in and can never accidentally hide all labels.
+    def get_label_display(self) -> dict:
+        stored = self.store.get_state(_KIND, "label_display") or {}
+        allow = stored.get("allow")
+        return {
+            "enabled": bool(stored.get("enabled", False)),
+            "allow": [str(x) for x in allow] if isinstance(allow, list) else [],
+        }
+
+    def update_label_display(self, patch: dict) -> dict:
+        cur = self.store.get_state(_KIND, "label_display") or {}
+        if "enabled" in patch:
+            cur["enabled"] = bool(patch["enabled"])
+        if isinstance(patch.get("allow"), list):
+            seen, out = set(), []                     # trim, drop blanks, dedupe (keep order)
+            for x in patch["allow"]:
+                s = str(x).strip()
+                if s and s not in seen:
+                    seen.add(s)
+                    out.append(s)
+            cur["allow"] = out
+        self.store.set_state(_KIND, "label_display", cur)
+        return self.get_label_display()
+
+    def display_labels(self, labels) -> list:
+        """Filter a label list for display by the admin whitelist. Disabled or
+        empty allow-list -> unchanged (show all). Used as a Jinja global so both
+        issue messages and digest items honour the same policy."""
+        cfg = self.get_label_display()
+        if not cfg["enabled"] or not cfg["allow"]:
+            return list(labels or [])
+        allow = set(cfg["allow"])
+        return [lbl for lbl in (labels or []) if lbl in allow]
+
+    # --- watched issues (special tags -> extra group rooms) ---------------
+    # A list of rules {id, name, tags[], rooms[], enabled}. An issue carrying ANY
+    # of a rule's tags is "special": the webhook also posts it to that rule's
+    # rooms (independent of the project's source room — works even with no source
+    # match). Stored as one JSON list under key "watched".
+    def get_watched(self) -> list:
+        stored = self.store.get_state(_KIND, "watched")
+        rules = stored.get("rules") if isinstance(stored, dict) else None
+        out = []
+        for r in (rules or []):
+            if not isinstance(r, dict):
+                continue
+            out.append({
+                "id": str(r.get("id") or ""),
+                "name": str(r.get("name") or ""),
+                "tags": [str(t) for t in (r.get("tags") or []) if str(t).strip()],
+                "rooms": [str(rm).strip() for rm in (r.get("rooms") or []) if str(rm).strip()],
+                "enabled": bool(r.get("enabled", True)),
+            })
+        return out
+
+    def set_watched(self, rules) -> list:
+        clean, seen_ids = [], set()
+        for i, r in enumerate(rules if isinstance(rules, list) else []):
+            if not isinstance(r, dict):
+                continue
+            rid = str(r.get("id") or "").strip() or f"w{i + 1}"
+            while rid in seen_ids:                     # guarantee unique ids
+                rid += "_"
+            seen_ids.add(rid)
+            tags, rooms = [], []
+            for t in (r.get("tags") or []):
+                s = str(t).strip()
+                if s and s not in tags:
+                    tags.append(s)
+            for rm in (r.get("rooms") or []):
+                s = str(rm).strip()
+                if s and s not in rooms:
+                    rooms.append(s)
+            clean.append({
+                "id": rid,
+                "name": str(r.get("name") or "").strip(),
+                "tags": tags,
+                "rooms": rooms,
+                "enabled": bool(r.get("enabled", True)),
+            })
+        self.store.set_state(_KIND, "watched", {"rules": clean})
+        return self.get_watched()
+
+    def watched_targets(self, labels) -> list:
+        """Enabled watched rules whose tags intersect this issue's labels (and
+        that have at least one destination room). Each result carries its rooms."""
+        have = set(labels or [])
+        return [r for r in self.get_watched()
+                if r["enabled"] and r["tags"] and r["rooms"] and have.intersection(r["tags"])]
+
 
 def weekday_names(days) -> str:
     return ", ".join(_WEEKDAY_NAMES[d] for d in sorted(days)) or "—"

@@ -1,5 +1,5 @@
 const DAYS=["Пн","Вт","Ср","Чт","Пт","Сб","Вс"];
-const TABS=[["dash","Дашборд"],["src","Группы"],["users","Получатели"],["sched","Рассылки"],["cal","Календарь"],["tpl","Шаблоны"],["logs","Логи"],["conn","Настройки"]];
+const TABS=[["dash","Дашборд"],["src","Группы"],["users","Получатели"],["sched","Рассылки"],["cal","Календарь"],["labels","Метки"],["tpl","Шаблоны"],["logs","Логи"],["conn","Настройки"]];
 // Pass cards are driven by the backend registry (S.registry); the only thing the
 // registry doesn't carry is an icon, so we keep a small map keyed by pass name
 // with a category fallback (group→🗓, personal→📋) and a default •.
@@ -80,6 +80,8 @@ async function load(){
   $('holidays').value=(s.schedule.holidays||[]).join('\n');
   renderActiveHours(s.active_hours);
   renderQuietAfterFull();
+  renderLabelDisplay();
+  renderWatched();
   renderSources();
   renderConn(s.conn);
   checkConfig();
@@ -525,6 +527,62 @@ function renderQuietAfterFull(){
 async function saveQuietAfterFull(){
   const v=Math.max(0,parseFloat($('quietAfterFull').value)||0);
   await api('/global','POST',{delta_quiet_after_full_h:v});toast('Сохранено');load();
+}
+// 🏷 Белый список меток для показа в сообщениях/дайджестах.
+function renderLabelDisplay(){
+  const d=(S&&S.label_display)||{enabled:false,allow:[]};
+  $('ldOn').checked=!!d.enabled;
+  $('ldAllow').value=(d.allow||[]).join('\n');
+}
+async function saveLabelDisplay(){
+  const allow=$('ldAllow').value.split('\n').map(s=>s.trim()).filter(Boolean);
+  await api('/label-display','POST',{enabled:$('ldOn').checked,allow});
+  toast('Сохранено');load();
+}
+// ⭐ Особые issue: правила «теги -> комнаты». Список карточек (как Группы), но
+// хранится одним списком — любое сохранение/удаление пишет ВЕСЬ список (replace-all).
+function watchCard(w){
+  w=w||{};const isNew=!w.id;
+  return `<div class="card watchcard" data-wid="${esc(w.id||'')}">
+    <div class="row" style="margin:0">
+      <b style="font-size:15px">${isNew?'➕ Новое правило':'⭐ '+esc(w.name||w.id)}</b>
+      <input class="wName" placeholder="Название (напр. Безопасность)" value="${esc(w.name||'')}" style="width:240px">
+      <span class="spacer"></span>
+      <label class="row" style="margin:0;gap:6px"><span class="mut" style="font-size:12px">вкл</span>
+        <span class="switch"><input type="checkbox" class="wEn" ${w.enabled!==false?'checked':''}><span class="slider"></span></span></label>
+    </div>
+    <div class="row" style="margin:10px 0 0;align-items:flex-start;gap:16px">
+      <div style="flex:1">
+        <div class="mut" style="margin-bottom:4px">Теги — по одному в строке (issue с любым из них считается особой):</div>
+        <textarea class="wTags" placeholder="security&#10;incident" style="min-height:84px">${esc((w.tags||[]).join('\n'))}</textarea></div>
+      <div style="flex:1">
+        <div class="mut" style="margin-bottom:4px">Комнаты Matrix — по одной в строке (куда слать):</div>
+        <textarea class="wRooms" placeholder="!abcdef:fakspro.ru" style="min-height:84px">${esc((w.rooms||[]).join('\n'))}</textarea></div>
+    </div>
+    <div class="row" style="margin:10px 0 0">
+      <button class="primary sm" onclick="saveWatched()">Сохранить</button>
+      ${isNew?'':`<button class="sm" onclick="deleteWatch(this)">Удалить</button>`}
+    </div>
+  </div>`;
+}
+function renderWatched(){
+  const list=(S.watched||[]).map(watchCard).join('');
+  $('watchCards').innerHTML=list+watchCard({});   // + пустая карточка для добавления
+}
+function gatherWatched(){
+  return [...document.querySelectorAll('.watchcard')].map(c=>{
+    const lines=sel=>(c.querySelector(sel).value||'').split('\n').map(s=>s.trim()).filter(Boolean);
+    return {id:c.dataset.wid||'', name:c.querySelector('.wName').value.trim(),
+      tags:lines('.wTags'), rooms:lines('.wRooms'), enabled:c.querySelector('.wEn').checked};
+  }).filter(w=>w.name||w.tags.length||w.rooms.length);   // отбрасываем нетронутую пустую карточку
+}
+async function saveWatched(){
+  await api('/watched','POST',{rules:gatherWatched()});toast('Сохранено');load();
+}
+async function deleteWatch(btn){
+  if(!confirm('Удалить это правило?'))return;
+  btn.closest('.watchcard').remove();
+  await api('/watched','POST',{rules:gatherWatched()});toast('Удалено');load();
 }
 async function passExample(tpl,btn){
   const box=btn.closest('.card').querySelector('.pEx');

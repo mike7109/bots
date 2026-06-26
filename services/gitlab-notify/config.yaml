@@ -27,8 +27,11 @@ users:
 #   mention          who gets pinged (assignee)
 # NB: the key is `event:` (not `on:`) — YAML reads a bare `on` as boolean True.
 rules:
-  - event: issue                   # webhook: issue opened/closed/reopened
-    actions: [open, close, reopen]
+  - event: issue                   # webhook: issue opened/closed/reopened (+ update)
+    # `update` is here so watched-issue routing (special tags -> group rooms) can
+    # render label/edit changes. app.py sends `update` ONLY to watched rooms — the
+    # normal source room still gets just open/close/reopen.
+    actions: [open, close, reopen, update]
     template: issue
     to: [room]
     mention: assignee
