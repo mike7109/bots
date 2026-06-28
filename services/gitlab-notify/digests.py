@@ -114,6 +114,7 @@ def _snapshot(rows: list[dict], today_iso: str, horizon_iso: str) -> dict:
         str(r["iid"]): {
             "iid": r["iid"], "title": r["title"], "url": r["url"],
             "due": r["due"] or "", "col": r["col"], "assignees": r["assignees"],
+            "labels": r.get("labels", []),     # carried so delta lists can show 🏷 chips
             "bucket": _bucket(r["due"], today_iso, horizon_iso),
         }
         for r in rows

@@ -9,7 +9,7 @@
 🆕 <b>Новые на тебе</b>
 <ul>
 {% for it in ch.new %}
-<li><a href="{{ it.url | safe_url }}">#{{ it.iid }}</a> {{ it.title | truncate(70, true, '…', 0) }}{% if it.due %} — <i>{{ it.due | ru_date }}</i>{% endif %}</li>
+<li><a href="{{ it.url | safe_url }}">#{{ it.iid }}</a> {{ it.title | truncate(70, true, '…', 0) }}{% set dl = display_labels(it.labels) %}{% if dl %} · {{ labels_html(dl) }}{% endif %}{% if it.due %} — <i>{{ it.due | ru_date }}</i>{% endif %}</li>
 {% endfor %}
 </ul>
 {% endif %}
@@ -17,7 +17,7 @@
 ➡️ <b>Сменили статус</b>
 <ul>
 {% for it in ch.moved %}
-<li><a href="{{ it.url | safe_url }}">#{{ it.iid }}</a> {{ it.title | truncate(60, true, '…', 0) }} · <i>{{ it.from or 'Открыта' }}</i> → <b>{{ it.col or 'Открыта' }}</b></li>
+<li><a href="{{ it.url | safe_url }}">#{{ it.iid }}</a> {{ it.title | truncate(60, true, '…', 0) }}{% set dl = display_labels(it.labels) %}{% if dl %} · {{ labels_html(dl) }}{% endif %} · <i>{{ it.from or 'Открыта' }}</i> → <b>{{ it.col or 'Открыта' }}</b></li>
 {% endfor %}
 </ul>
 {% endif %}
@@ -25,7 +25,7 @@
 ⏰ <b>Стали просрочены</b>
 <ul>
 {% for it in ch.overdue %}
-<li><a href="{{ it.url | safe_url }}">#{{ it.iid }}</a> {{ it.title | truncate(70, true, '…', 0) }} — <i>был {{ it.due | ru_date }}</i></li>
+<li><a href="{{ it.url | safe_url }}">#{{ it.iid }}</a> {{ it.title | truncate(70, true, '…', 0) }}{% set dl = display_labels(it.labels) %}{% if dl %} · {{ labels_html(dl) }}{% endif %} — <i>был {{ it.due | ru_date }}</i></li>
 {% endfor %}
 </ul>
 {% endif %}
@@ -33,7 +33,7 @@
 📅 <b>Дедлайн сегодня</b>
 <ul>
 {% for it in ch.today %}
-<li><a href="{{ it.url | safe_url }}">#{{ it.iid }}</a> {{ it.title | truncate(70, true, '…', 0) }}</li>
+<li><a href="{{ it.url | safe_url }}">#{{ it.iid }}</a> {{ it.title | truncate(70, true, '…', 0) }}{% set dl = display_labels(it.labels) %}{% if dl %} · {{ labels_html(dl) }}{% endif %}</li>
 {% endfor %}
 </ul>
 {% endif %}
@@ -41,7 +41,7 @@
 📆 <b>Сменился срок</b>
 <ul>
 {% for it in ch.due %}
-<li><a href="{{ it.url | safe_url }}">#{{ it.iid }}</a> {{ it.title | truncate(60, true, '…', 0) }} · <i>{{ it.from_due | ru_date if it.from_due else '—' }}</i> → <b>{{ it.due | ru_date if it.due else '—' }}</b></li>
+<li><a href="{{ it.url | safe_url }}">#{{ it.iid }}</a> {{ it.title | truncate(60, true, '…', 0) }}{% set dl = display_labels(it.labels) %}{% if dl %} · {{ labels_html(dl) }}{% endif %} · <i>{{ it.from_due | ru_date if it.from_due else '—' }}</i> → <b>{{ it.due | ru_date if it.due else '—' }}</b></li>
 {% endfor %}
 </ul>
 {% endif %}
@@ -49,7 +49,7 @@
 ✅ <b>Сняты с тебя / закрыты</b>
 <ul>
 {% for it in ch.removed %}
-<li><a href="{{ it.url | safe_url }}">#{{ it.iid }}</a> {{ it.title | truncate(70, true, '…', 0) }}</li>
+<li><a href="{{ it.url | safe_url }}">#{{ it.iid }}</a> {{ it.title | truncate(70, true, '…', 0) }}{% set dl = display_labels(it.labels) %}{% if dl %} · {{ labels_html(dl) }}{% endif %}</li>
 {% endfor %}
 </ul>
 {% endif %}
