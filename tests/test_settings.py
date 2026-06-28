@@ -345,3 +345,67 @@ def test_breaker_reset_clears_fields(settings):
     settings.set_breaker({"tripped": True, "since": 1.0, "reason": "x"})
     settings.set_breaker({"tripped": False})
     assert settings.get_breaker() == {"tripped": False, "since": None, "reason": ""}
+
+
+# --- label display whitelist (🏷 which chips appear) -------------------
+def test_label_display_default_shows_all(settings):
+    cfg = settings.get_label_display()
+    assert cfg == {"enabled": False, "allow": []}
+    # disabled -> labels unchanged
+    assert settings.display_labels(["bug", "security"]) == ["bug", "security"]
+
+
+def test_label_display_empty_allow_shows_all(settings):
+    settings.update_label_display({"enabled": True, "allow": []})
+    assert settings.display_labels(["bug", "x"]) == ["bug", "x"]   # empty list = show all
+
+
+def test_label_display_filters_when_enabled(settings):
+    settings.update_label_display({"enabled": True, "allow": ["security", "bug"]})
+    assert settings.display_labels(["bug", "workflow::wip", "security"]) == ["bug", "security"]
+
+
+def test_label_display_normalizes_allow(settings):
+    settings.update_label_display({"allow": [" bug ", "bug", "", "security"]})
+    assert settings.get_label_display()["allow"] == ["bug", "security"]   # trimmed + deduped
+
+
+def test_label_display_merge_patch(settings):
+    settings.update_label_display({"allow": ["a"]})
+    settings.update_label_display({"enabled": True})        # doesn't wipe allow
+    cfg = settings.get_label_display()
+    assert cfg["enabled"] is True and cfg["allow"] == ["a"]
+
+
+# --- watched issues (special tags -> rooms) ---------------------------
+def test_watched_default_empty(settings):
+    assert settings.get_watched() == []
+    assert settings.watched_targets(["security"]) == []
+
+
+def test_watched_set_normalizes_and_assigns_ids(settings):
+    out = settings.set_watched([
+        {"name": "Sec", "tags": [" security ", "security", ""], "rooms": ["!a:s", "!a:s", "!b:s"]},
+        {"name": "", "tags": ["x"], "rooms": ["!c:s"], "enabled": False},
+    ])
+    assert out[0]["id"] == "w1" and out[0]["tags"] == ["security"] and out[0]["rooms"] == ["!a:s", "!b:s"]
+    assert out[1]["id"] == "w2" and out[1]["enabled"] is False
+
+
+def test_watched_targets_matches_any_tag(settings):
+    settings.set_watched([{"name": "Sec", "tags": ["security", "incident"], "rooms": ["!sec:s"]}])
+    assert [r["rooms"] for r in settings.watched_targets(["bug", "incident"])] == [["!sec:s"]]
+    assert settings.watched_targets(["bug"]) == []         # no tag overlap
+
+
+def test_watched_targets_skips_disabled_and_roomless(settings):
+    settings.set_watched([
+        {"name": "off", "tags": ["a"], "rooms": ["!r:s"], "enabled": False},
+        {"name": "noroom", "tags": ["a"], "rooms": []},
+    ])
+    assert settings.watched_targets(["a"]) == []
+
+
+def test_watched_persists_across_restart(settings, store):
+    settings.set_watched([{"name": "Sec", "tags": ["security"], "rooms": ["!sec:s"]}])
+    assert Settings(store).watched_targets(["security"])[0]["name"] == "Sec"

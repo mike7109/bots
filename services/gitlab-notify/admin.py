@@ -235,6 +235,8 @@ def create_admin_router(ctx) -> list[APIRouter]:
             "push_modes": list(PUSH_MODES),
             "stats": ctx.store.log_stats(7),
             "alerts": settings.get_alerts(),
+            "label_display": settings.get_label_display(),   # 🏷 which labels to show
+            "watched": settings.get_watched(),               # ⭐ special-tag -> rooms rules
             "poke": settings.get_poke(),            # anti-spam cfg for /api/poke
             "breaker": settings.get_breaker(),      # SAFETY: tripped flag + reason
             "guard": settings.get_guard(),          # rate-limit/breaker thresholds
@@ -277,6 +279,26 @@ def create_admin_router(ctx) -> list[APIRouter]:
         Invalid HH:MM values are ignored (kept at the prior/default)."""
         body = await request.json()
         return settings.update_active_hours(body if isinstance(body, dict) else {})
+
+    @router.post("/api/label-display")
+    async def set_label_display(request: Request):
+        """Update the 🏷 display whitelist. Body = {enabled, allow:[...]};
+        returns the effective config. Empty/disabled list -> all labels shown."""
+        body = await request.json()
+        patch = {}
+        if "enabled" in body:
+            patch["enabled"] = bool(body["enabled"])
+        if isinstance(body.get("allow"), list):
+            patch["allow"] = body["allow"]
+        return settings.update_label_display(patch)
+
+    @router.post("/api/watched")
+    async def set_watched(request: Request):
+        """Replace the watched-issue rule list. Body = {rules:[{name,tags,rooms,
+        enabled}]}; backend normalizes (trims, dedupes, assigns ids)."""
+        body = await request.json()
+        rules = body.get("rules") if isinstance(body, dict) else None
+        return {"ok": True, "watched": settings.set_watched(rules or [])}
 
     @router.post("/api/alerts")
     async def set_alerts(request: Request):

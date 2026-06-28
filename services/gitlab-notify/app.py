@@ -73,17 +73,48 @@ async def webhook(request: Request, x_gitlab_token: str = Header(default="")):
     if event is None:
         return {"ignored": f"unhandled event: {payload.get('object_kind')}"}
 
-    # Multi-group routing: send to the matching source's room. No source for this
-    # project's group -> nowhere configured to send, so ignore it.
+    # Watched-issue routing: any enabled rule whose tags intersect this issue's
+    # FULL label set adds its rooms as extra targets — independent of the source
+    # match, so a "special" issue reaches its group even from an unconfigured
+    # project. Detection uses event.labels (unfiltered); the display whitelist
+    # only trims chips at render time, so it can't hide a watched tag here.
+    watch_rooms = []
+    for r in ctx.settings.watched_targets(event.labels):
+        for rm in r["rooms"]:
+            if rm not in watch_rooms:
+                watch_rooms.append(rm)
+
+    # Multi-group routing: the matching source's room. `update` events are too
+    # noisy for the normal channel, so they go ONLY to watch rooms; open/close/
+    # reopen also post to the source room (as before).
     src = ctx.sources.match_path(event.project)
-    if not src:
-        return {"ignored": f"no source for project {event.project}"}
+    default_room = src.get("room") if src else None
+    post_default = event.action != "update" and bool(default_room)
+
+    if not post_default and not watch_rooms:
+        reason = "no source for project" if event.action != "update" else "update: no watched match"
+        return {"ignored": f"{reason} {event.project}".strip()}
+
     # Optional: quiet realtime issue-events outside the active-hours window too
     # (default OFF — webhooks normally stay realtime regardless of the window).
     if ctx.settings.get_active_hours().get("webhooks_quiet") and not ctx.settings.is_active_now():
         return {"ignored": "тихие часы"}
-    event.room = src.get("room")
-    return ctx.engine.handle(event)
+
+    # Post to the default room, then each distinct watch room (skipping the
+    # default if a watch rule names the same room). `extra.watched` marks the
+    # watch copies so the template can flag them (⭐).
+    results = {}
+    if post_default:
+        event.room = default_room
+        event.extra = {}
+        results["default"] = ctx.engine.handle(event)
+    for rm in watch_rooms:
+        if post_default and rm == default_room:
+            continue
+        event.room = rm
+        event.extra = {"watched": True}
+        results[f"watch:{rm}"] = ctx.engine.handle(event)
+    return {"posted": list(results.keys()), "results": results}
 
 
 def _poke_fail(reason: str, status: int, **extra) -> JSONResponse:

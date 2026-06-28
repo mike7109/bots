@@ -6,7 +6,7 @@
 {{ s.emoji }} <b>{{ s.title }}</b>
 <ul>
 {% for it in s["items"] %}
-<li><a href="{{ it.url | safe_url }}">#{{ it.iid }}</a> {{ it.title | truncate(70, true, '…', 0) }}{% if it.due %} — <i>{{ it.due | ru_date }}</i>{% endif %}{% if s.show_who %}{{ who(it.assignees) }}{% endif %}{% if it.idle is defined and it.idle is not none %} · <i>{{ it.idle }} дн. тишины</i>{% endif %}</li>
+<li><a href="{{ it.url | safe_url }}">#{{ it.iid }}</a> {{ it.title | truncate(70, true, '…', 0) }}{% set dl = display_labels(it.labels) %}{% if dl %} · {{ labels_html(dl) }}{% endif %}{% if it.due %} — <i>{{ it.due | ru_date }}</i>{% endif %}{% if s.show_who %}{{ who(it.assignees) }}{% endif %}{% if it.idle is defined and it.idle is not none %} · <i>{{ it.idle }} дн. тишины</i>{% endif %}</li>
 {% endfor %}
 </ul>
 {% endfor %}

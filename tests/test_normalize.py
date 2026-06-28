@@ -1,5 +1,6 @@
 """normalize: GitLab webhook payload -> botkit Event. Only issue events;
-maps open/reopen/close; drops 'update' and non-issue kinds."""
+maps open/reopen/close/update; drops non-issue kinds. (`update` is mapped but
+the webhook handler routes it only to watched-issue rooms — see app.py.)"""
 from __future__ import annotations
 
 from normalize import normalize
@@ -30,8 +31,9 @@ def test_normalize_maps_three_actions():
         assert ev is not None and ev.action == expected
 
 
-def test_normalize_drops_update():
-    assert normalize(_payload("update")) is None     # 'update' is intentionally dropped
+def test_normalize_maps_update():
+    ev = normalize(_payload("update"))               # mapped (routed to watched rooms in app.py)
+    assert ev is not None and ev.action == "update"
 
 
 def test_normalize_drops_unknown_action():

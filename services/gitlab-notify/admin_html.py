@@ -115,6 +115,23 @@ HTML = r"""<!doctype html>
     </div>
   </div>
 
+  <!-- Метки и слежка -->
+  <div class="view" data-v="labels">
+    <div class="card"><h2>🏷 Какие метки показывать в сообщениях</h2>
+      <p class="hint">У задач бывает много меток. Включи фильтр и перечисли те, что стоит показывать — в issue-уведомлениях и дайджестах останутся только они (чипы 🏷). Выключено или список пуст — показываем все метки, как раньше. Имена меток должны точно совпадать с GitLab (с учётом регистра и <span class="mono">scope::value</span>).</p>
+      <div class="row"><span class="mut">Показывать только метки из списка</span>
+        <span class="switch"><input type="checkbox" id="ldOn"><span class="slider"></span></span></div>
+      <div class="mut" style="margin:8px 0 4px">Метки для показа — по одной в строке:</div>
+      <textarea id="ldAllow" placeholder="security&#10;priority::high&#10;bug"></textarea>
+      <div class="row"><button class="primary" onclick="saveLabelDisplay()">Сохранить</button></div>
+    </div>
+    <div class="card"><h2>⭐ Особые issue — слать в выбранные группы</h2>
+      <p class="hint">Issue с определёнными метками — особые, за ними следим пристально. Каждое правило: набор тегов → набор комнат Matrix. Если у issue есть <b>любой</b> из тегов правила, копия уведомления уходит в его комнаты (дополнительно к обычной общей комнате). Работает даже для проектов без настроенной группы. Реагирует на открытие/закрытие/переоткрытие, а также на <b>изменения</b> (правки/смена меток) — изменения идут <b>только</b> в эти комнаты, обычную не спамят.</p>
+      <p class="hint" style="margin:0 0 12px">Комната — это её Matrix room id вида <span class="mono">!abcdef:fakspro.ru</span>. Бот должен состоять в комнате. Особые уведомления помечаются ⭐.</p>
+      <div id="watchCards"></div>
+    </div>
+  </div>
+
   <!-- Шаблоны -->
   <div class="view" data-v="tpl">
     <div class="card"><h2>Шаблоны сообщений</h2>

@@ -9,9 +9,11 @@ from __future__ import annotations
 
 from botkit.notify.event import Event
 
-# GitLab issue `action` -> our action vocabulary. `update` is intentionally
-# dropped (too noisy: every label/assignee change fires one).
-_ISSUE_ACTION = {"open": "open", "reopen": "reopen", "close": "close"}
+# GitLab issue `action` -> our action vocabulary. `update` (every label/assignee
+# change fires one) is mapped too, but routed ONLY to watched-issue rooms by the
+# webhook handler (app.py) — it never reaches the normal source room, so the
+# regular channel stays quiet. open/close/reopen go to the source room as before.
+_ISSUE_ACTION = {"open": "open", "reopen": "reopen", "close": "close", "update": "update"}
 
 
 def normalize(payload: dict) -> Event | None:
