@@ -152,7 +152,7 @@ function renderAlerts(){
   const a=(S&&S.alerts)||{engineers:[],enabled:true};
   $('alertsOn').checked=a.enabled!==false;
   const sel=new Set(a.engineers||[]);
-  const rows=Object.entries(S.users||{});
+  const rows=Object.entries(S.users||{}).filter(([l,u])=>!u.external);   // алерты — только команда из config
   $('alertEngineers').innerHTML=rows.length?('<table><tbody>'+rows.map(([login,u])=>`
     <tr><td style="width:32px"><input type="checkbox" class="alEng" value="${esc(login)}" ${sel.has(login)?'checked':''}></td>
     <td><b>${esc(u.name||login)}</b> <span class="mut mono" style="font-size:11px">${esc(login)}</span></td></tr>`).join('')+'</tbody></table>')
@@ -177,7 +177,7 @@ function renderUsers(){
   const rows=Object.entries(S.users).filter(([l,u])=>matchFilter(u)&&(!q||l.toLowerCase().includes(q)||(u.name||'').toLowerCase().includes(q)));
   $('userCount').textContent=rows.length+' из '+Object.keys(S.users).length;
   $('users').innerHTML=rows.map(([login,u])=>`
-    <tr><td><b>${esc(u.name)}</b><div class="mut mono">${esc(login)}</div></td>
+    <tr><td><b>${esc(u.name)}</b>${u.external?' <span class="badge ignored" title="Нет в config.yaml — бот пишет по @login:домен. Мьют/пуш работают.">вне конфига</span>':''}<div class="mut mono">${esc(login)}</div></td>
     <td class="mono mut">${esc(u.mxid||'—')}</td>
     <td><span class="pill ${u.invite}">${({accepted:'✅ принял',pending:'⏳ ждёт',none:'— нет DM'})[u.invite]}</span></td>
     <td><span class="switch"><input type="checkbox" ${u.muted?'':'checked'} onchange="setUser('${login}',{muted:!this.checked})"><span class="slider"></span></span></td>

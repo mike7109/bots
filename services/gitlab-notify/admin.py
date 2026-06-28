@@ -90,24 +90,45 @@ SAMPLE_CTX = {
 
 
 def _invite_status(ctx) -> dict:
-    """For each configured user: do we have a DM room, and did they accept it?"""
+    """Recipients the bot can DM, with their invite acceptance.
+
+    Two sources, merged: (1) the configured users (config.yaml) by login/name,
+    and (2) anyone the bot ALREADY has a DM with (`m.direct`) — i.e. GitLab
+    assignees reached via the @login:domain fallback who aren't in config.yaml.
+    The bot notifies any assignee, so a config-only list hides real recipients.
+
+    Extras are keyed by the mxid localpart (their GitLab login, which is what the
+    fallback resolves) so per-user mute/push still address them correctly; they
+    carry external=True so the UI can flag "вне конфига"."""
     matrix = ctx.matrix
     try:
         direct = matrix._direct_map()
     except Exception as e:                       # noqa: BLE001 — degrade gracefully
         log.warning("m.direct read failed: %s", e)
         direct = {}
-    out = {}
+
+    def _status(mxid: str | None) -> str:
+        rooms = direct.get(mxid) if mxid else None
+        if not rooms:
+            return "none"
+        try:
+            return "accepted" if matrix.membership(rooms[0], mxid) == "join" else "pending"
+        except Exception:                        # noqa: BLE001
+            return "pending"
+
+    out, seen = {}, set()
     for login, info in (ctx.config.get("users") or {}).items():
         mxid = ctx.identity.matrix_id(login)
-        status = "none"
-        rooms = direct.get(mxid) if mxid else None
-        if rooms:
-            try:
-                status = "accepted" if matrix.membership(rooms[0], mxid) == "join" else "pending"
-            except Exception:                    # noqa: BLE001
-                status = "pending"
-        out[login] = {"name": info.get("name", login), "mxid": mxid, "invite": status}
+        seen.add(mxid)
+        out[login] = {"name": info.get("name", login), "mxid": mxid,
+                      "invite": _status(mxid), "external": False}
+    # Extra DM partners not in config.yaml (the bot has messaged them already).
+    for mxid in direct:
+        if mxid in seen:
+            continue
+        login = mxid[1:].split(":")[0] if mxid.startswith("@") else mxid
+        out.setdefault(login, {"name": login, "mxid": mxid,
+                               "invite": _status(mxid), "external": True})
     return out
 
 
