@@ -28,12 +28,11 @@ users:
 # NB: the key is `event:` (not `on:`) — YAML reads a bare `on` as boolean True.
 rules:
   - event: issue                   # webhook: issue opened/closed/reopened
-    # Main source room gets these standalone; a watched issue also nests open/
-    # close/reopen into its thread under the root card (app.py). `open` is nested
-    # too so the topic renders immediately (a Matrix thread needs ≥1 reply under
-    # the root). `update` never renders via this template: app.py turns a watched-
-    # issue update into an `issue_change` (assignee/due only) or drops it (labels/
-    # rename).
+    # Main source room gets these standalone; a watched issue also nests close/
+    # reopen into its thread under the root card (app.py). `open` is NOT nested —
+    # the watched thread's ROOT card (issue_root) IS the open notice. `update`
+    # never renders via this template: app.py turns a watched-issue update into an
+    # `issue_change` (assignee/due only) or drops it (labels/rename).
     actions: [open, close, reopen]
     template: issue
     to: [room]
@@ -46,11 +45,17 @@ rules:
     mention: mentioned             # ping ONLY @-mentioned configured users; never auto-ping assignees
     notice: false                  # deliver as m.text so the watch room is NOTIFIED (m.notice arrives silently)
 
-  - event: issue_root              # thread root for a watched issue: the full card
-    template: issue_root           # description + due + assignee + labels — created ONCE per (issue, room)
+  - event: issue_root              # thread ANCHOR (topic title) for a watched issue
+    template: issue_root           # minimal 🚩 #N title — the thread's name in Element
     to: [room]                     # same watch room (event.room set by app.py)
-    notice: false                  # m.text — the room IS notified that a watched issue appeared
-    skip_guard: true               # structural anchor (1/issue, behind the throttle) — exempt from all guard caps
+    notice: true                   # quiet (m.notice): just the title; the card below carries the detail + the ping
+    skip_guard: true               # structural anchor (1/issue) — exempt from all guard caps
+
+  - event: issue_card              # FIRST message IN the topic: the full task card
+    template: issue_card           # описание · срок · исполнитель · лейблы — posted with the anchor
+    to: [room]
+    notice: false                  # m.text — the room IS notified a watched task appeared
+    skip_guard: true               # structural (1/issue, posted alongside the anchor)
 
   - event: issue_change            # watched issue: assignee/due change, posted INTO the thread
     template: issue_change         # app.py only emits this for a real assignee/due diff

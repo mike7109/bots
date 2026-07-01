@@ -1,7 +1,6 @@
-{# Thread root for a watched issue: the full card. Created ONCE per (issue, room)
-   — eagerly when the issue opens, or lazily on the first later event (comment /
-   watched-label add). Always the same shape. Everything else about the issue
-   (close/reopen, comments, assignee/due changes) nests under this message. #}
-🚩 <b>Задача</b> · <a href="{{ url | safe_url }}">#{{ iid }}</a> <b>{{ title | truncate(120, true, '…', 0) }}</b>
-{% if description %}<blockquote>{{ clip_comment(description, url) }}</blockquote>{% endif %}
-{% set shown = display_labels(labels) %}{% if due %}<br>📅 {{ due | ru_date }}{% endif %}{% if assignees %}{% if due %} · {% else %}<br>{% endif %}👤 {{ mentions(assignees) }}{% endif %}{% if shown %}<br>{{ labels_html(shown) }}{% endif %}
+{# Thread ANCHOR (root) for a watched issue — the topic's title in Element.
+   Deliberately minimal: the flag + issue number + title become the thread's name.
+   The full card (description/due/assignee/labels) is posted as the FIRST message
+   INSIDE the thread (issue_card), so a topic renders immediately on creation with
+   the card as its first message. Created ONCE per (issue, room). #}
+🚩 <a href="{{ url | safe_url }}">#{{ iid }}</a> <b>{{ title | truncate(140, true, '…', 0) }}</b>

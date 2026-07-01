@@ -69,13 +69,16 @@ def healthz():
 def _ensure_thread_root(event, rm: str, tkey: str | None):
     """Return (root_event_id, created_now) for a watched issue's Matrix thread.
 
-    The root is the full issue CARD (issue_root: description + due + assignee +
-    labels), created ONCE per (issue, room) and remembered under `issue_thread`.
-    It's built here from whatever event first reaches the room — eagerly on the
-    issue `open`, or lazily on a later comment / watched-label add — so a lazy
-    root looks like an eager one (a comment carries less, hence the best-effort
-    fields in normalize._note). Store faults NEVER break delivery (mirrors
-    engine.py, where bookkeeping can't sink a send)."""
+    A topic must be VISIBLE the moment the issue appears, with the full card as its
+    first message — so on first sight of a watched issue in this room we post TWO
+    structural messages: the minimal ANCHOR (issue_root: 🚩 #N title, the thread's
+    root/name) and then the full CARD (issue_card: description + due + assignee +
+    labels) nested under it as the first in-thread message. Element renders a topic
+    right away (root + one reply). Created ONCE per (issue, room), remembered under
+    `issue_thread`, from whatever event first arrives — eagerly on `open`, or lazily
+    on a later comment / watched-label add (a comment carries less, hence the
+    best-effort card fields in normalize._note). Store faults NEVER break delivery
+    (mirrors engine.py, where bookkeeping can't sink a send)."""
     if not tkey:
         return None, False
     try:
@@ -84,31 +87,36 @@ def _ensure_thread_root(event, rm: str, tkey: str | None):
             return st["event_id"], False
     except Exception:                               # noqa: BLE001 — threading is best-effort
         log.exception("issue-thread lookup failed")
-    root = dataclasses.replace(event, kind="issue_root", room=rm, extra={"watched": True})
-    hres = ctx.engine.handle(root)
+    anchor = dataclasses.replace(event, kind="issue_root", room=rm, extra={"watched": True})
+    hres = ctx.engine.handle(anchor)
     eid = hres.get("event_id") if isinstance(hres, dict) else None
-    if eid:
-        try:
-            ctx.store.set_state("issue_thread", tkey, {"event_id": eid})
-        except Exception:                           # noqa: BLE001 — threading is best-effort
-            log.exception("issue-thread store failed")
-    return eid, bool(eid)
+    if not eid:
+        return None, False                          # kill switch / breaker — caller falls back
+    try:
+        ctx.store.set_state("issue_thread", tkey, {"event_id": eid})
+    except Exception:                               # noqa: BLE001 — threading is best-effort
+        log.exception("issue-thread store failed")
+    card = dataclasses.replace(event, kind="issue_card", room=rm,
+                               extra={"watched": True, "thread_root": eid})
+    ctx.engine.handle(card)                          # the full card, first message IN the thread
+    return eid, True
 
 
 def _thread_body_kind(event) -> str | None:
     """What (if anything) a watched issue's thread posts for THIS event:
-      note              -> the comment                     (kind "note")
-      open/close/reopen -> the state change, issue template (kind "issue")
-      update            -> ONLY a real assignee/due change  (kind "issue_change")
-      label-only or rename update -> None (nothing to nest; the root may still
-                           have just been lazily created by the caller).
+      note          -> the comment                     (kind "note")
+      close/reopen  -> the state change, issue template (kind "issue")
+      update        -> ONLY a real assignee/due change  (kind "issue_change")
+      open / label-only or rename update -> None (the root card is the sole notice;
+                       other edits stay silent — the root may still have just been
+                       lazily created by the caller).
 
-    `open` DOES nest a "🟢 Открыта" under the root card on purpose: a Matrix thread
-    only renders as a topic once ≥1 message nests under the root, so without it a
-    freshly-created issue would show as a lone top-level card, not a topic."""
+    As agreed: `open` posts ONLY the root card (nothing nested); a watched-label
+    add just creates the root; the branch carries only what's significant —
+    assignee/due changes, close/reopen, comments."""
     if event.kind == "note":
         return "note"
-    if event.action in ("open", "close", "reopen"):
+    if event.action in ("close", "reopen"):
         return "issue"
     if event.action == "update" and (event.changes.get("assignees") or event.changes.get("due_date")):
         return "issue_change"

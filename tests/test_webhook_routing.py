@@ -44,11 +44,10 @@ class FakeEngine:
             "action": event.action,
             "watched": bool((event.extra or {}).get("watched")),
         }
-        if event.kind == "note":                     # note-only fields; other recs stay compact
+        if event.kind in ("note", "issue_change", "issue_card"):   # threaded content carries a root
+            rec["thread_root"] = (event.extra or {}).get("thread_root")
+        if event.kind == "note":
             rec["comment"] = event.comment
-            rec["thread_root"] = (event.extra or {}).get("thread_root")
-        if event.kind == "issue_change":
-            rec["thread_root"] = (event.extra or {}).get("thread_root")
         self.calls.append(rec)
         return {"sent": [event.room], "event_id": f"$evt{self._seq}"}
 
@@ -140,12 +139,14 @@ def test_open_with_watched_tag_posts_default_and_root_card(settings, monkeypatch
     ctx = _ctx(settings)
     monkeypatch.setattr(app_module, "ctx", ctx)
     _call(ctx, _payload("open", labels=("security",)))
-    # source room: standalone open; watch room: the thread ROOT card + a "🟢 Открыта"
-    # nested under it (so Element renders the topic straight away, not a lone card).
+    # source room: standalone open; watch room: the ANCHOR (thread root/title) + the
+    # full CARD nested under it as the first in-thread message (topic visible at once).
+    # `open` adds nothing further (the card is the open notice).
     assert ctx.engine.calls == [
         {"kind": "issue", "room": DEFAULT_ROOM, "action": "open", "watched": False},
         {"kind": "issue_root", "room": "!sec:srv", "action": "open", "watched": True},
-        {"kind": "issue", "room": "!sec:srv", "action": "open", "watched": True},   # nested open
+        {"kind": "issue_card", "room": "!sec:srv", "action": "open", "watched": True,
+         "thread_root": "$evt2"},
     ]
     assert ctx.store.get_state("issue_thread", f"{PROJECT}#7@!sec:srv") == {"event_id": "$evt2"}
 
@@ -158,8 +159,10 @@ def test_close_on_watched_nests_under_root(settings, monkeypatch):
     _call(ctx, _payload("close", labels=("security",)))
     assert ctx.engine.calls == [
         {"kind": "issue", "room": DEFAULT_ROOM, "action": "close", "watched": False},
-        {"kind": "issue_root", "room": "!sec:srv", "action": "close", "watched": True},
-        {"kind": "issue", "room": "!sec:srv", "action": "close", "watched": True},   # nested state change
+        {"kind": "issue_root", "room": "!sec:srv", "action": "close", "watched": True},       # anchor
+        {"kind": "issue_card", "room": "!sec:srv", "action": "close", "watched": True,
+         "thread_root": "$evt2"},                                                             # card
+        {"kind": "issue", "room": "!sec:srv", "action": "close", "watched": True},            # nested state change
     ]
 
 
@@ -170,8 +173,12 @@ def test_update_label_only_makes_root_but_posts_nothing_else(settings, monkeypat
     ctx = _ctx(settings)
     monkeypatch.setattr(app_module, "ctx", ctx)
     _call(ctx, _payload("update", labels=("security",)))
+    # lazily creates the topic (anchor + card), nothing more for a label-only edit
     assert ctx.engine.calls == [
-        {"kind": "issue_root", "room": "!sec:srv", "action": "update", "watched": True}]
+        {"kind": "issue_root", "room": "!sec:srv", "action": "update", "watched": True},
+        {"kind": "issue_card", "room": "!sec:srv", "action": "update", "watched": True,
+         "thread_root": "$evt1"},
+    ]
 
 
 def test_update_assignee_change_posts_issue_change(settings, monkeypatch):
@@ -181,9 +188,11 @@ def test_update_assignee_change_posts_issue_change(settings, monkeypatch):
     changes = {"assignees": {"previous": [], "current": [{"username": "bob"}]}}
     _call(ctx, _payload("update", labels=("security",), changes=changes))
     assert ctx.engine.calls == [
-        {"kind": "issue_root", "room": "!sec:srv", "action": "update", "watched": True},
+        {"kind": "issue_root", "room": "!sec:srv", "action": "update", "watched": True},       # anchor
+        {"kind": "issue_card", "room": "!sec:srv", "action": "update", "watched": True,
+         "thread_root": "$evt1"},                                                              # card
         {"kind": "issue_change", "room": "!sec:srv", "action": "update",
-         "watched": True, "thread_root": "$evt1"},
+         "watched": True, "thread_root": "$evt1"},                                             # the change
     ]
 
 
@@ -194,7 +203,7 @@ def test_update_due_change_posts_issue_change(settings, monkeypatch):
     changes = {"due_date": {"previous": None, "current": "2026-07-10"}}
     _call(ctx, _payload("update", labels=("security",), changes=changes))
     kinds = [c["kind"] for c in ctx.engine.calls]
-    assert kinds == ["issue_root", "issue_change"]
+    assert kinds == ["issue_root", "issue_card", "issue_change"]
 
 
 def test_update_without_watched_is_ignored(settings, monkeypatch):
@@ -212,7 +221,8 @@ def test_watched_works_without_source(settings, monkeypatch):
     _call(ctx, _payload("open", labels=("security",)))
     assert ctx.engine.calls == [
         {"kind": "issue_root", "room": "!sec:srv", "action": "open", "watched": True},
-        {"kind": "issue", "room": "!sec:srv", "action": "open", "watched": True},   # nested open
+        {"kind": "issue_card", "room": "!sec:srv", "action": "open", "watched": True,
+         "thread_root": "$evt1"},
     ]
 
 
@@ -248,10 +258,12 @@ def test_note_on_watched_goes_only_to_watch_room(settings, monkeypatch):
     ctx = _ctx(settings)                              # a real source room exists
     monkeypatch.setattr(app_module, "ctx", ctx)
     _call(ctx, _note_payload())
-    # never the source room: the root card anchors the thread, then the comment
-    # nests under it — both only in the watch room.
+    # never the source room: anchor + card create the topic, then the comment nests
+    # under the anchor — all only in the watch room.
     assert ctx.engine.calls == [
         {"kind": "issue_root", "room": "!sec:srv", "action": "create", "watched": True},
+        {"kind": "issue_card", "room": "!sec:srv", "action": "create", "watched": True,
+         "thread_root": "$evt1"},
         {"kind": "note", "room": "!sec:srv", "action": "create", "watched": True,
          "comment": "готово @m.bahmutskij", "thread_root": "$evt1"},
     ]
@@ -294,9 +306,10 @@ def test_note_first_comment_is_threaded_under_the_root(settings, monkeypatch):
     ctx = _ctx(settings)
     monkeypatch.setattr(app_module, "ctx", ctx)
     _call(ctx, _note_payload())
-    assert ctx.engine.calls[0]["kind"] == "issue_root"           # the card anchors the thread
-    assert "comment" not in ctx.engine.calls[0]
-    assert ctx.engine.calls[1]["thread_root"] == "$evt1"        # first comment nests under it
+    assert ctx.engine.calls[0]["kind"] == "issue_root"           # anchor (thread root)
+    assert ctx.engine.calls[1]["kind"] == "issue_card"           # card nested first
+    comment = next(c for c in ctx.engine.calls if "comment" in c)
+    assert comment["thread_root"] == "$evt1"                     # comment nests under the anchor
     assert ctx.store.get_state("issue_thread", f"{PROJECT}#7@!sec:srv") == {"event_id": "$evt1"}
 
 
@@ -318,9 +331,9 @@ def test_note_threads_are_per_room(settings, monkeypatch):
     settings.set_watched([{"name": "Sec", "tags": ["security"], "rooms": ["!a:srv", "!b:srv"]}])
     ctx = _ctx(settings)
     monkeypatch.setattr(app_module, "ctx", ctx)
-    _call(ctx, _note_payload())                                  # !a: root $evt1 + comment $evt2
+    _call(ctx, _note_payload())               # !a: anchor $evt1 + card $evt2 + comment $evt3
     assert ctx.store.get_state("issue_thread", f"{PROJECT}#7@!a:srv") == {"event_id": "$evt1"}
-    assert ctx.store.get_state("issue_thread", f"{PROJECT}#7@!b:srv") == {"event_id": "$evt3"}
+    assert ctx.store.get_state("issue_thread", f"{PROJECT}#7@!b:srv") == {"event_id": "$evt4"}
 
 
 def test_note_store_fault_never_breaks_delivery(settings, monkeypatch):
