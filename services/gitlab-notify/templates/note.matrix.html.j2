@@ -1,4 +1,3 @@
 {% set shown = display_labels(labels) %}{% if shown %}{{ labels_html(shown) }}<br>{% endif %}{% if extra and extra.watched %}🚩 {% endif %}💬 <b>Новый комментарий</b>{% if author %} · {{ mention(author) }}{% endif %}<br>
-<a href="{{ url | safe_url }}">#{{ iid }}</a> <b>{{ title | truncate(120, true, '…', 0) }}</b>
+<a href="{{ url | safe_url }}">#{{ iid }}</a> <b>{{ title | truncate(120, true, '…', 0) }}</b> · <a href="{{ url | safe_url }}">🔗</a>
 <blockquote>{{ clip_comment(comment, url) }}</blockquote>
-🔗 <a href="{{ url | safe_url }}">Открыть комментарий</a>
