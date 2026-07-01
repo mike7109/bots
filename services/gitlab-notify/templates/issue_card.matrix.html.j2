@@ -1,6 +1,9 @@
 {# The full task CARD — the FIRST message inside a watched issue's thread (nested
    under the issue_root anchor). Posted once, together with the anchor, when the
    topic is first created (eagerly on open, or lazily on a later comment / label
-   add). Agreed shape: описание · срок · исполнитель · лейблы. #}
-{% if description %}<blockquote>{{ clip_comment(description, url) }}</blockquote>{% else %}📝 <i>без описания</i><br>{% endif %}
-{% set shown = display_labels(labels) %}{% if due %}📅 {{ due | ru_date }}{% endif %}{% if assignees %}{% if due %} · {% endif %}👤 {{ mentions(assignees) }}{% endif %}{% if shown %}{% if due or assignees %} · {% endif %}{{ labels_html(shown) }}{% endif %}
+   add). Labelled fields, plain-text assignee (info, not a ping). #}
+{% if description %}📝 <b>Описание</b><br>{{ clip_comment(description, url) }}<br>{% else %}📝 <i>Без описания</i>{% endif %}
+{% set shown = display_labels(labels) %}
+{% if assignees %}<br>👤 <b>Исполнитель:</b> {{ names(assignees) }}{% endif %}
+{% if due %}<br>📅 <b>Срок:</b> {{ due | ru_date }}{% endif %}
+{% if shown %}<br>🏷 <b>Метки:</b> {{ shown | join(', ') }}{% endif %}

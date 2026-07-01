@@ -50,6 +50,10 @@ def build_context() -> AppContext:
     # Comment truncation for watched-issue note notifications (chars + lines, live
     # admin config). Same rationale as display_labels — kept out of botkit.
     renderer.env.globals["clip_comment"] = settings.clip_comment
+    # Plain-text display names (no @-mention pill) for the issue card, where the
+    # assignee is shown as info, not pinged. Autoescape handles the returned str.
+    renderer.env.globals["names"] = lambda logins: ", ".join(
+        identity.display_name(x) for x in (logins or []) if x)
 
     # Matrix homeserver/token come from settings (DB; seeded from env once) so
     # they're admin-managed; not required at boot — the panel configures them.
