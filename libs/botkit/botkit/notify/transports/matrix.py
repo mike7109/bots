@@ -37,9 +37,18 @@ class MatrixTransport:
                 if mxid and mxid not in mentions:
                     mentions.append(mxid)
 
+        # Delivery loudness. Default: m.text only when actually pinging, else
+        # m.notice (quiet) — so clients don't suppress a highlight, but routine
+        # bot output stays low-key. A rule may pin it with `notice: true|false`;
+        # watched-issue comments set `notice: false` so the room is NOTIFIED about
+        # a new comment even with nobody @-mentioned (m.notice is suppressed by
+        # clients' default push rules, which reads as "arrived silently").
+        notice = rule.get("notice")
+        if notice is None:
+            notice = not mentions
         self.client.send_html(
             room, rendered,
             mention_user_ids=mentions,
-            notice=not mentions,      # m.text when pinging so clients don't suppress the highlight
+            notice=notice,
         )
         return {"room": room, "mentions": mentions}

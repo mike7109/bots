@@ -41,6 +41,7 @@ rules:
     template: note
     to: [room]                     # app.py forces watch-rooms-only routing for notes
     mention: mentioned             # ping ONLY @-mentioned configured users; never auto-ping assignees
+    notice: false                  # deliver as m.text so the watch room is NOTIFIED (m.notice arrives silently)
 
   - event: due_soon                # cron: due tomorrow -> shared room
     template: due_soon

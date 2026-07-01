@@ -51,6 +51,21 @@ def test_mentioned_dedupes_repeats():
     assert out["mentions"] == ["@m.bahmutskij:fakspro.ru"]
 
 
+def test_notice_false_rule_notifies_room_without_ping():
+    # A comment with no @-mention still arrives as m.text (not silent m.notice)
+    # when the rule pins notice=false, so the watch room gets a notification.
+    ev = Event(kind="note", action="create", room="!r", mention_logins=[])
+    out = _dispatch(ev, {"mention": "mentioned", "room_id": "!r", "notice": False})
+    assert out["mentions"] == [] and out["notice"] is False
+
+
+def test_notice_default_stays_quiet_without_ping():
+    # A rule that omits `notice` keeps the old behaviour: no ping -> m.notice.
+    ev = Event(kind="note", action="create", room="!r", mention_logins=[])
+    out = _dispatch(ev, {"mention": "mentioned", "room_id": "!r"})
+    assert out["notice"] is True
+
+
 def test_assignee_mode_keeps_domain_fallback():
     # an assignee not in the users map still resolves via @login:domain (regression)
     ev = Event(kind="issue", action="open", room="!r", assignees=["d.nikulin"])
