@@ -226,14 +226,18 @@ def test_watched_works_without_source(settings, monkeypatch):
     ]
 
 
-def test_watch_room_equal_to_default_not_double_posted(settings, monkeypatch):
+def test_watch_room_equal_to_default_threads_not_flat(settings, monkeypatch):
+    # When the source room IS the watch room, a watched open must build the TOPIC
+    # there (anchor + card), NOT a flat standalone message — and not both.
     settings.set_watched([{"name": "Sec", "tags": ["security"], "rooms": [DEFAULT_ROOM]}])
     ctx = _ctx(settings)
     monkeypatch.setattr(app_module, "ctx", ctx)
     _call(ctx, _payload("open", labels=("security",)))
-    # same room as default -> posted once (as the default, not watched)
     assert ctx.engine.calls == [
-        {"kind": "issue", "room": DEFAULT_ROOM, "action": "open", "watched": False}]
+        {"kind": "issue_root", "room": DEFAULT_ROOM, "action": "open", "watched": True},
+        {"kind": "issue_card", "room": DEFAULT_ROOM, "action": "open", "watched": True,
+         "thread_root": "$evt1"},
+    ]
 
 
 # --- note (comment) routing: watch-rooms only, threaded, throttled ----------

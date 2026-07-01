@@ -11,6 +11,7 @@ import logging
 import pathlib
 import time
 from contextlib import asynccontextmanager
+from urllib.parse import quote
 
 from fastapi import FastAPI, Header, Request
 from fastapi.responses import JSONResponse
@@ -18,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from markupsafe import escape
 
 from botkit.config import env
+from botkit.gitlab import GitLabClient
 from botkit.notify.render import _safe_url
 from botkit.webhook import verify_token
 from admin import create_admin_router
@@ -66,6 +68,31 @@ def healthz():
     return {"status": "ok"}
 
 
+def _issue_details(event):
+    """Best-effort GitLab fetch to COMPLETE a card built from a note. A note webhook
+    carries the issue body + due, but only NUMERIC assignee ids (no usernames), so a
+    topic created from a comment would show no assignee. One REST GET fills it in.
+    Uses the project's source token (short timeout, fully best-effort): returns {} if
+    there's no matching source/token/url or on any API error — the card then shows
+    whatever the payload had."""
+    try:
+        src = ctx.sources.match_path(event.project) or {}
+        token = src.get("token")
+        url = ctx.settings.conn_value("gitlab_url")
+        if not (token and url and event.project and event.iid):
+            return {}
+        gl = GitLabClient(url, token, timeout=6.0)
+        d = gl.get_json(f"/api/v4/projects/{quote(event.project, safe='')}/issues/{event.iid}")
+        return {
+            "assignees": [a.get("username") for a in (d.get("assignees") or []) if a.get("username")],
+            "description": (d.get("description") or "").strip(),
+            "due": d.get("due_date"),
+        }
+    except Exception:                               # noqa: BLE001 — enrichment is best-effort
+        log.exception("gitlab issue enrich failed")
+        return {}
+
+
 def _ensure_thread_root(event, rm: str, tkey: str | None):
     """Return (root_event_id, created_now) for a watched issue's Matrix thread.
 
@@ -96,7 +123,20 @@ def _ensure_thread_root(event, rm: str, tkey: str | None):
         ctx.store.set_state("issue_thread", tkey, {"event_id": eid})
     except Exception:                               # noqa: BLE001 — threading is best-effort
         log.exception("issue-thread store failed")
-    card = dataclasses.replace(event, kind="issue_card", room=rm,
+    # A card built from a note lacks assignee usernames — enrich it from the API so
+    # the topic's first message always shows the assignee (best-effort; no-op on
+    # issue-events, which already carry full assignees/description/due).
+    card_src = event
+    if event.kind == "note":
+        det = _issue_details(event)
+        if det:
+            card_src = dataclasses.replace(
+                event,
+                assignees=det["assignees"] or event.assignees,
+                description=det["description"] or event.description,
+                due=det["due"] or event.due,
+            )
+    card = dataclasses.replace(card_src, kind="issue_card", room=rm,
                                extra={"watched": True, "thread_root": eid})
     ctx.engine.handle(card)                          # the full card, first message IN the thread
     return eid, True
@@ -150,7 +190,11 @@ async def webhook(request: Request, x_gitlab_token: str = Header(default="")):
     src = ctx.sources.match_path(event.project)
     default_room = src.get("room") if src else None
     watch_only = event.kind == "note" or event.action == "update"
-    post_default = not watch_only and bool(default_room)
+    # A room that is BOTH the source room AND a watch room must get the THREADED
+    # copy (topic), not a flat standalone message — otherwise the watched issue's
+    # open/close/reopen would post plainly and its topic would never form there.
+    # So only post the flat default when the source room isn't also a watch room.
+    post_default = not watch_only and bool(default_room) and default_room not in watch_rooms
 
     if not post_default and not watch_rooms:
         reason = "no watched match" if watch_only else "no source for project"
@@ -169,9 +213,6 @@ async def webhook(request: Request, x_gitlab_token: str = Header(default="")):
             dataclasses.replace(event, room=default_room, extra={}))
 
     for rm in watch_rooms:
-        if post_default and rm == default_room:
-            continue
-
         # A watched issue is ONE thread whose ROOT is the full card (issue_root).
         # Make sure it exists (created eagerly on `open`, lazily otherwise), then
         # nest this event under it. Keyed by iid (stable across a rename); a real
