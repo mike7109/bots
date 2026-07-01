@@ -26,3 +26,5 @@ class Event:
     extra: dict = field(default_factory=dict)  # anything source-specific
     comment: str = ""               # note/comment body (kind == "note")
     mention_logins: list[str] = field(default_factory=list)  # @-mentioned logins to ping (transport resolves)
+    description: str = ""           # issue body — the thread-root card for a watched issue
+    changes: dict = field(default_factory=dict)  # normalized issue `update` diff: {assignees|due_date: {previous, current}}

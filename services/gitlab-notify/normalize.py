@@ -48,6 +48,27 @@ def normalize(payload: dict) -> Event | None:
     return None
 
 
+def _changes(raw: dict) -> dict:
+    """Distil a GitLab issue `update` diff down to the two fields we thread into
+    a watched issue's topic: who it's assigned to and its due date. Everything
+    else (labels, title/rename, description edits, position, …) is intentionally
+    dropped — those must NOT post a thread message. Each entry is included ONLY
+    when it actually changed, as {previous: [...]/date, current: [...]/date}."""
+    out: dict = {}
+    a = raw.get("assignees")
+    if isinstance(a, dict):
+        prev = [u.get("username") for u in (a.get("previous") or []) if u.get("username")]
+        cur = [u.get("username") for u in (a.get("current") or []) if u.get("username")]
+        if prev != cur:
+            out["assignees"] = {"previous": prev, "current": cur}
+    d = raw.get("due_date")
+    if isinstance(d, dict):
+        prev, cur = d.get("previous"), d.get("current")
+        if prev != cur:
+            out["due_date"] = {"previous": prev, "current": cur}
+    return out
+
+
 def _issue(payload: dict) -> Event | None:
     attr = payload.get("object_attributes", {})
     action = _ISSUE_ACTION.get(attr.get("action"))
@@ -56,6 +77,9 @@ def _issue(payload: dict) -> Event | None:
 
     assignees = [a.get("username") for a in (payload.get("assignees") or []) if a.get("username")]
     labels = [lbl.get("title", "") for lbl in payload.get("labels", [])]
+    # `changes` only rides `update` webhooks; parse the assignee/due diff so the
+    # watched-issue thread can say WHAT changed (app.py stays silent for the rest).
+    changes = _changes(payload.get("changes") or {}) if action == "update" else {}
 
     return Event(
         kind="issue",
@@ -69,6 +93,8 @@ def _issue(payload: dict) -> Event | None:
         assignees=assignees,
         author=(payload.get("user") or {}).get("username"),
         due=attr.get("due_date"),
+        description=(attr.get("description") or "").strip(),
+        changes=changes,
     )
 
 
@@ -103,4 +129,10 @@ def _note(payload: dict) -> Event | None:
         author=(payload.get("user") or {}).get("username"),   # the commenter
         comment=body,
         mention_logins=_mentions(body),
+        # Best-effort so a comment that has to LAZILY create the thread root still
+        # renders the full card. The note payload's issue object carries the body
+        # and due date (but only numeric assignee_ids, so assignees stay empty here
+        # — the common path creates the root eagerly on `open`, where they're set).
+        description=(issue.get("description") or "").strip(),
+        due=issue.get("due_date"),
     )

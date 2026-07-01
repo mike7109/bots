@@ -27,11 +27,13 @@ users:
 #   mention          who gets pinged (assignee)
 # NB: the key is `event:` (not `on:`) — YAML reads a bare `on` as boolean True.
 rules:
-  - event: issue                   # webhook: issue opened/closed/reopened (+ update)
-    # `update` is here so watched-issue routing (special tags -> group rooms) can
-    # render label/edit changes. app.py sends `update` ONLY to watched rooms — the
-    # normal source room still gets just open/close/reopen.
-    actions: [open, close, reopen, update]
+  - event: issue                   # webhook: issue opened/closed/reopened
+    # Main source room gets these standalone; a watched issue also gets close/
+    # reopen nested into its thread (app.py). `open` is NOT threaded as an `issue`
+    # message — the watched thread's ROOT card (issue_root) is the open notice.
+    # `update` never renders via this template: app.py turns a watched-issue update
+    # into an `issue_change` (assignee/due only) or drops it (labels/rename).
+    actions: [open, close, reopen]
     template: issue
     to: [room]
     mention: assignee
@@ -43,11 +45,17 @@ rules:
     mention: mentioned             # ping ONLY @-mentioned configured users; never auto-ping assignees
     notice: false                  # deliver as m.text so the watch room is NOTIFIED (m.notice arrives silently)
 
-  - event: note_root               # thread anchor: the first comment on a watched issue posts this
-    actions: [create]              # a small top-level issue banner; comments then nest under it
-    template: note_root            # so even the FIRST comment already lives in a thread
-    to: [room]                     # same watch room (event.room set by app.py); quiet m.notice, no ping
-    skip_guard: true               # structural anchor (1/issue, behind the note throttle) — exempt from all guard caps
+  - event: issue_root              # thread root for a watched issue: the full card
+    template: issue_root           # description + due + assignee + labels — created ONCE per (issue, room)
+    to: [room]                     # same watch room (event.room set by app.py)
+    notice: false                  # m.text — the room IS notified that a watched issue appeared
+    skip_guard: true               # structural anchor (1/issue, behind the throttle) — exempt from all guard caps
+
+  - event: issue_change            # watched issue: assignee/due change, posted INTO the thread
+    template: issue_change         # app.py only emits this for a real assignee/due diff
+    to: [room]
+    mention: assignee              # ping the (new) assignee — their ownership/deadline moved
+    notice: false                  # always notify the thread about the change
 
   - event: due_soon                # cron: due tomorrow -> shared room
     template: due_soon

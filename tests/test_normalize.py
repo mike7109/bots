@@ -6,11 +6,11 @@ from __future__ import annotations
 from normalize import _mentions, normalize
 
 
-def _payload(action="open", **attr_extra):
+def _payload(action="open", changes=None, **attr_extra):
     attr = {"iid": 7, "title": "Fix it", "url": "https://gl/x/-/issues/7",
             "state": "opened", "action": action, "due_date": "2026-06-10"}
     attr.update(attr_extra)
-    return {
+    payload = {
         "object_kind": "issue",
         "object_attributes": attr,
         "project": {"path_with_namespace": "fakspro/infra"},
@@ -18,6 +18,9 @@ def _payload(action="open", **attr_extra):
         "assignees": [{"username": "bob"}, {"username": "carol"}, {"no_name": 1}],
         "labels": [{"title": "bug"}, {"title": "workflow::in progress"}],
     }
+    if changes is not None:
+        payload["changes"] = changes                 # top-level, as GitLab sends it
+    return payload
 
 
 def test_normalize_non_issue_returns_none():
@@ -64,6 +67,48 @@ def test_normalize_handles_missing_optional_fields():
     assert ev is not None
     assert ev.iid == "" and ev.project == "" and ev.author is None
     assert ev.assignees == [] and ev.labels == []
+    assert ev.description == "" and ev.changes == {}
+
+
+def test_normalize_extracts_description():
+    ev = normalize(_payload("open", description="  Полное описание задачи  "))
+    assert ev.description == "Полное описание задачи"      # stripped
+
+
+def test_normalize_non_update_has_no_changes():
+    # `changes` only rides update webhooks; open/close/reopen carry an empty diff
+    ev = normalize(_payload("open", changes={"due_date": {"previous": None, "current": "2026-07-01"}}))
+    assert ev.changes == {}
+
+
+def test_normalize_update_parses_assignee_and_due_changes():
+    changes = {
+        "assignees": {"previous": [{"username": "bob"}], "current": [{"username": "carol"}]},
+        "due_date": {"previous": "2026-06-01", "current": "2026-07-01"},
+        "labels": {"previous": [], "current": [{"title": "security"}]},   # dropped
+        "title": {"previous": "a", "current": "b"},                        # dropped
+    }
+    ev = normalize(_payload("update", changes=changes))
+    assert ev.changes == {
+        "assignees": {"previous": ["bob"], "current": ["carol"]},
+        "due_date": {"previous": "2026-06-01", "current": "2026-07-01"},
+    }
+
+
+def test_normalize_update_drops_unchanged_and_noise():
+    changes = {
+        "assignees": {"previous": [{"username": "bob"}], "current": [{"username": "bob"}]},  # no change
+        "labels": {"previous": [], "current": [{"title": "x"}]},
+        "updated_at": {"previous": "t1", "current": "t2"},
+    }
+    ev = normalize(_payload("update", changes=changes))
+    assert ev.changes == {}                                # nothing assignee/due actually changed
+
+
+def test_normalize_update_unassign_to_empty():
+    changes = {"assignees": {"previous": [{"username": "bob"}], "current": []}}
+    ev = normalize(_payload("update", changes=changes))
+    assert ev.changes == {"assignees": {"previous": ["bob"], "current": []}}
 
 
 # --- note (comment) events --------------------------------------------
@@ -118,6 +163,16 @@ def test_normalize_note_empty_body_dropped():
 def test_normalize_note_no_labels():
     ev = normalize(_note_payload("hi", labels=()))
     assert ev is not None and ev.labels == []                # watched-detect finds no match
+
+
+def test_normalize_note_extracts_description_and_due_for_lazy_root():
+    # a comment may have to LAZILY create the thread root, so it carries the issue
+    # body + due (best-effort) from the note payload's `issue` object.
+    payload = _note_payload("hi")
+    payload["issue"]["description"] = "  тело задачи  "
+    payload["issue"]["due_date"] = "2026-08-01"
+    ev = normalize(payload)
+    assert ev.description == "тело задачи" and ev.due == "2026-08-01"
 
 
 # --- @-mention parser -------------------------------------------------

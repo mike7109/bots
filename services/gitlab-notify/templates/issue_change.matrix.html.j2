@@ -1,0 +1,6 @@
+{# A watched issue's assignee/due-date change, posted INTO its thread. Only these
+   two edits reach here (app.py drops label/rename/other updates); shows the
+   before → after so the topic reads as a timeline. #}
+✏️ <b>Изменения</b> · <a href="{{ url | safe_url }}">#{{ iid }}</a> <b>{{ title | truncate(80, true, '…', 0) }}</b>
+{% if changes.assignees %}<br>👤 {% if changes.assignees.previous %}{{ mentions(changes.assignees.previous) }}{% else %}—{% endif %} → {% if changes.assignees.current %}{{ mentions(changes.assignees.current) }}{% else %}—{% endif %}{% endif %}
+{% if changes.due_date %}<br>📅 {% if changes.due_date.previous %}{{ changes.due_date.previous | ru_date }}{% else %}—{% endif %} → {% if changes.due_date.current %}{{ changes.due_date.current | ru_date }}{% else %}—{% endif %}{% endif %}

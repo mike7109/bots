@@ -1,2 +1,2 @@
-{% set shown = display_labels(labels) %}{% if shown %}{{ labels_html(shown) }}<br>{% endif %}{% if extra and extra.watched %}⭐ {% endif %}{% if action == 'update' %}✏️ <b>Обновлена</b>{% else %}{{ action | action_emoji }} <b>{{ action | ru_action }}</b>{% endif %}{{ who(assignees) }}<br>
+{% set shown = display_labels(labels) %}{% if shown %}{{ labels_html(shown) }}<br>{% endif %}{% if extra and extra.watched %}🚩 {% endif %}{{ action | action_emoji }} <b>{{ action | ru_action }}</b>{{ who(assignees) }}<br>
 <a href="{{ url | safe_url }}">#{{ iid }}</a> <b>{{ title | truncate(120, true, '…', 0) }}</b>

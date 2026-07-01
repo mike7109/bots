@@ -66,6 +66,52 @@ def healthz():
     return {"status": "ok"}
 
 
+def _ensure_thread_root(event, rm: str, tkey: str | None):
+    """Return (root_event_id, created_now) for a watched issue's Matrix thread.
+
+    The root is the full issue CARD (issue_root: description + due + assignee +
+    labels), created ONCE per (issue, room) and remembered under `issue_thread`.
+    It's built here from whatever event first reaches the room — eagerly on the
+    issue `open`, or lazily on a later comment / watched-label add — so a lazy
+    root looks like an eager one (a comment carries less, hence the best-effort
+    fields in normalize._note). Store faults NEVER break delivery (mirrors
+    engine.py, where bookkeeping can't sink a send)."""
+    if not tkey:
+        return None, False
+    try:
+        st = ctx.store.get_state("issue_thread", tkey)
+        if st and st.get("event_id"):
+            return st["event_id"], False
+    except Exception:                               # noqa: BLE001 — threading is best-effort
+        log.exception("issue-thread lookup failed")
+    root = dataclasses.replace(event, kind="issue_root", room=rm, extra={"watched": True})
+    hres = ctx.engine.handle(root)
+    eid = hres.get("event_id") if isinstance(hres, dict) else None
+    if eid:
+        try:
+            ctx.store.set_state("issue_thread", tkey, {"event_id": eid})
+        except Exception:                           # noqa: BLE001 — threading is best-effort
+            log.exception("issue-thread store failed")
+    return eid, bool(eid)
+
+
+def _thread_body_kind(event) -> str | None:
+    """What (if anything) a watched issue's thread posts for THIS event:
+      note          -> the comment                     (kind "note")
+      close/reopen  -> the state change, issue template (kind "issue")
+      update        -> ONLY a real assignee/due change  (kind "issue_change")
+      open / label-only or rename update -> None (the root card is the sole notice;
+                       other edits stay silent — the root may still have just been
+                       lazily created by the caller)."""
+    if event.kind == "note":
+        return "note"
+    if event.action in ("close", "reopen"):
+        return "issue"
+    if event.action == "update" and (event.changes.get("assignees") or event.changes.get("due_date")):
+        return "issue_change"
+    return None
+
+
 @app.post("/webhook")
 async def webhook(request: Request, x_gitlab_token: str = Header(default="")):
     verify_token(x_gitlab_token, ctx.settings.conn_value("webhook_secret"))
@@ -104,62 +150,54 @@ async def webhook(request: Request, x_gitlab_token: str = Header(default="")):
     if ctx.settings.get_active_hours().get("webhooks_quiet") and not ctx.settings.is_active_now():
         return {"ignored": "тихие часы"}
 
-    # Post to the default room, then each distinct watch room (skipping the
-    # default if a watch rule names the same room). `extra.watched` marks the
-    # watch copies so the template can flag them (⭐).
+    # Post to the default room first (open/close/reopen only), then thread every
+    # watched-room event into that issue's ONE Matrix topic.
     results = {}
     if post_default:
-        event.room = default_room
-        event.extra = {}
-        results["default"] = ctx.engine.handle(event)
+        results["default"] = ctx.engine.handle(
+            dataclasses.replace(event, room=default_room, extra={}))
+
     for rm in watch_rooms:
         if post_default and rm == default_room:
             continue
-        # SAFETY: comments arrive one webhook each; a chatty watched issue could
-        # otherwise push the room past the guard's per-target cap and trip the
-        # GLOBAL breaker (halting ALL sending). Shed excess BEFORE handle (no
-        # guard.record) — the dropped comments stay readable in GitLab.
-        if event.kind == "note" and not ctx.settings.note_send_allowed(rm):
+
+        # A watched issue is ONE thread whose ROOT is the full card (issue_root).
+        # Make sure it exists (created eagerly on `open`, lazily otherwise), then
+        # nest this event under it. Keyed by iid (stable across a rename); a real
+        # iid is required so a malformed payload can't merge distinct issues.
+        tkey = f"{event.project}#{event.iid}@{rm}" if event.iid else None
+        root_eid, root_created = _ensure_thread_root(event, rm, tkey)
+
+        body_kind = _thread_body_kind(event)
+        if body_kind is None:
+            # `open` (root card is the notice) or a label/rename-only update: the
+            # root may have just been lazily created, but there's nothing to nest.
+            results[f"watch:{rm}"] = {"posted": "root"} if root_created else {"ignored": "nothing to thread"}
+            continue
+
+        # SAFETY: comments + change notices arrive one webhook each; a chatty
+        # watched issue could push the room past the guard's per-target cap and
+        # trip the GLOBAL breaker (halting ALL sending). Shed excess BEFORE handle
+        # (no guard.record) — the dropped events stay readable in GitLab. The root
+        # card is exempt (bounded to one per issue) and already sent above.
+        if body_kind in ("note", "issue_change") and not ctx.settings.note_send_allowed(rm):
             results[f"throttled:{rm}"] = {"ignored": "throttled"}
             continue
-        event.room = rm
-        event.extra = {"watched": True}
-        # Thread comments of ONE issue together (per room). So even the FIRST
-        # comment already sits in a thread, post a small top-level "header"
-        # (note_root) as the thread root, then nest every comment under it. Keyed
-        # by iid (stable across a rename) — renaming never breaks the thread; a
-        # real iid is required so a malformed (iid-less) payload can't collapse
-        # distinct issues into one thread. Store faults NEVER break delivery
-        # (mirrors engine.py, where store bookkeeping can't sink a send).
-        tkey = f"{event.project}#{event.iid}@{rm}" if (event.kind == "note" and event.iid) else None
-        root_eid = None
-        if tkey:
-            try:
-                root = ctx.store.get_state("note_thread", tkey)
-                if root and root.get("event_id"):
-                    root_eid = root["event_id"]
-            except Exception:                       # noqa: BLE001 — threading is best-effort
-                log.exception("note-thread lookup failed")
-            if not root_eid:                        # first comment: post the anchor header
-                header = dataclasses.replace(event, kind="note_root", room=rm, extra={})
-                hres = ctx.engine.handle(header)
-                root_eid = hres.get("event_id") if isinstance(hres, dict) else None
-                if root_eid:
-                    try:
-                        ctx.store.set_state("note_thread", tkey, {"event_id": root_eid})
-                    except Exception:               # noqa: BLE001 — threading is best-effort
-                        log.exception("note-thread store failed")
-            if root_eid:
-                event.extra["thread_root"] = root_eid
-        res = ctx.engine.handle(event)
+
+        extra = {"watched": True}
+        if root_eid:
+            extra["thread_root"] = root_eid
+        kind = "issue_change" if body_kind == "issue_change" else event.kind
+        res = ctx.engine.handle(dataclasses.replace(event, kind=kind, room=rm, extra=extra))
         results[f"watch:{rm}"] = res
-        # Fallback: the anchor couldn't post (kill switch / breaker) — let the
-        # comment itself become the root so a later comment can still thread.
+
+        # Fallback: the root couldn't post (kill switch / breaker) — let this
+        # message become the thread root so a later event can still nest.
         if tkey and not root_eid and isinstance(res, dict) and res.get("event_id"):
             try:
-                ctx.store.set_state("note_thread", tkey, {"event_id": res["event_id"]})
+                ctx.store.set_state("issue_thread", tkey, {"event_id": res["event_id"]})
             except Exception:                       # noqa: BLE001 — threading is best-effort
-                log.exception("note-thread store failed")
+                log.exception("issue-thread store failed")
     return {"posted": list(results.keys()), "results": results}
 
 
