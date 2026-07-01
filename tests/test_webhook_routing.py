@@ -190,11 +190,12 @@ def test_note_on_watched_goes_only_to_watch_room(settings, monkeypatch):
     ctx = _ctx(settings)                              # a real source room exists
     monkeypatch.setattr(app_module, "ctx", ctx)
     _call(ctx, _note_payload())
-    # never the source room — only the watch room, marked watched, with the comment.
-    # First comment has no thread root yet (it becomes the root).
+    # never the source room. The first comment posts a header (thread anchor)
+    # then the comment nested under it — both only in the watch room.
     assert ctx.engine.calls == [
+        {"room": "!sec:srv", "action": "create", "watched": False},          # note_root anchor
         {"room": "!sec:srv", "action": "create", "watched": True,
-         "comment": "готово @m.bahmutskij", "thread_root": None},
+         "comment": "готово @m.bahmutskij", "thread_root": "$evt1"},          # comment in the thread
     ]
 
 
@@ -223,46 +224,50 @@ def test_note_burst_is_throttled_before_the_breaker(settings, monkeypatch):
     monkeypatch.setattr(app_module, "ctx", ctx)
     for _ in range(5):
         res = _call(ctx, _note_payload())
-    assert len(ctx.engine.calls) == 4                # only 4 delivered
+    comment_calls = [c for c in ctx.engine.calls if "comment" in c]
+    assert len(comment_calls) == 4                   # only 4 comments delivered (5th shed)
     assert any(k.startswith("throttled:") for k in res["results"])
 
 
-# --- note threading: comments of one issue nest under the first ---------
-def test_note_first_comment_becomes_thread_root(settings, monkeypatch):
+# --- note threading: a header anchors the thread; comments nest under it ----
+def test_note_first_comment_is_threaded_under_a_header(settings, monkeypatch):
     settings.set_watched([{"name": "Sec", "tags": ["security"], "rooms": ["!sec:srv"]}])
     ctx = _ctx(settings)
     monkeypatch.setattr(app_module, "ctx", ctx)
     _call(ctx, _note_payload())
-    # posted WITHOUT a thread root, and its event id is stored as the root
-    assert ctx.engine.calls[0]["thread_root"] is None
+    # a header anchor is posted first (no comment), then the FIRST comment already
+    # nests under it — nothing lands top-level in the room except the header.
+    assert "comment" not in ctx.engine.calls[0]                  # the note_root header
+    assert ctx.engine.calls[1]["thread_root"] == "$evt1"        # first comment in the thread
     assert ctx.store.get_state("note_thread", f"{PROJECT}#7@!sec:srv") == {"event_id": "$evt1"}
 
 
-def test_note_second_comment_threads_under_first(settings, monkeypatch):
+def test_note_second_comment_reuses_the_same_thread(settings, monkeypatch):
     settings.set_watched([{"name": "Sec", "tags": ["security"], "rooms": ["!sec:srv"]}])
     ctx = _ctx(settings)
     monkeypatch.setattr(app_module, "ctx", ctx)
-    _call(ctx, _note_payload())                                  # #1 -> root $evt1
-    _call(ctx, _note_payload(note="второй коммент"))            # #2 -> nests under $evt1
-    assert ctx.engine.calls[0]["thread_root"] is None
-    assert ctx.engine.calls[1]["thread_root"] == "$evt1"        # threaded under the first
-    # root is not overwritten by later comments
+    _call(ctx, _note_payload())                                  # header $evt1 + comment
+    _call(ctx, _note_payload(note="второй коммент"))            # comment only, same thread
+    comment_calls = [c for c in ctx.engine.calls if "comment" in c]
+    assert [c["thread_root"] for c in comment_calls] == ["$evt1", "$evt1"]
+    headers = [c for c in ctx.engine.calls if "comment" not in c]
+    assert len(headers) == 1                                     # header posted once only
     assert ctx.store.get_state("note_thread", f"{PROJECT}#7@!sec:srv") == {"event_id": "$evt1"}
 
 
 def test_note_threads_are_per_room(settings, monkeypatch):
-    # same issue watched into two rooms keeps an independent thread root per room
+    # same issue watched into two rooms keeps an independent thread (header) per room
     settings.set_watched([{"name": "Sec", "tags": ["security"], "rooms": ["!a:srv", "!b:srv"]}])
     ctx = _ctx(settings)
     monkeypatch.setattr(app_module, "ctx", ctx)
-    _call(ctx, _note_payload())
+    _call(ctx, _note_payload())                                  # !a: header $evt1 + comment $evt2
     assert ctx.store.get_state("note_thread", f"{PROJECT}#7@!a:srv") == {"event_id": "$evt1"}
-    assert ctx.store.get_state("note_thread", f"{PROJECT}#7@!b:srv") == {"event_id": "$evt2"}
+    assert ctx.store.get_state("note_thread", f"{PROJECT}#7@!b:srv") == {"event_id": "$evt3"}
 
 
 def test_note_store_fault_never_breaks_delivery(settings, monkeypatch):
-    # A SQLite/JSON hiccup in the thread store must degrade to "no threading",
-    # NOT bubble up as a 500 that drops (or on resend, duplicates) the comment.
+    # A SQLite/JSON hiccup in the thread store must NOT bubble up as a 500 that
+    # drops (or on resend, duplicates) the comment — delivery still happens.
     settings.set_watched([{"name": "Sec", "tags": ["security"], "rooms": ["!sec:srv"]}])
     ctx = _ctx(settings)
 
@@ -277,18 +282,20 @@ def test_note_store_fault_never_breaks_delivery(settings, monkeypatch):
     monkeypatch.setattr(app_module, "ctx", ctx)
     res = _call(ctx, _note_payload())                       # must NOT raise
     assert "posted" in res
-    assert ctx.engine.calls == [                            # still delivered, just un-threaded
-        {"room": "!sec:srv", "action": "create", "watched": True,
-         "comment": "готово @m.bahmutskij", "thread_root": None},
-    ]
+    comment_calls = [c for c in ctx.engine.calls if "comment" in c]
+    assert len(comment_calls) == 1                         # comment still delivered, no crash
+    assert comment_calls[0]["comment"] == "готово @m.bahmutskij"
 
 
 def test_note_without_iid_posts_top_level(settings, monkeypatch):
-    # A malformed (iid-less) note must post a normal message, never share a
-    # per-project-room thread key with other iid-less notes.
+    # A malformed (iid-less) note must post a normal message (no header, no thread),
+    # never share a per-project-room thread key with other iid-less notes.
     settings.set_watched([{"name": "Sec", "tags": ["security"], "rooms": ["!sec:srv"]}])
     ctx = _ctx(settings)
     monkeypatch.setattr(app_module, "ctx", ctx)
     _call(ctx, _note_payload(iid=None))
-    assert ctx.engine.calls[0]["thread_root"] is None
+    assert ctx.engine.calls == [                            # only the comment, top-level
+        {"room": "!sec:srv", "action": "create", "watched": True,
+         "comment": "готово @m.bahmutskij", "thread_root": None},
+    ]
     assert ctx.store.d == {}                                # no thread key persisted

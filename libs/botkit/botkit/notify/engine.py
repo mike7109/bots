@@ -149,8 +149,14 @@ class Engine:
                 # stops the NEXT send (this loop and all future handles). Derive a
                 # target_key from the outcome so PER-TARGET caps are meaningful:
                 # the room id for room sends, "dm:<mxid>" for each DM delivered;
-                # fall back to the destination name.
-                if self.guard is not None:
+                # fall back to the destination name. A rule may opt OUT with
+                # `skip_guard` for a structural, self-bounded message (e.g. a
+                # thread-anchor header, one per issue, already bounded upstream by
+                # the note throttle): it is exempt from ALL guard caps (global /
+                # per-target / duplicate) so it can't push any count toward a trip
+                # — but it's still STOPPED by an already tripped breaker (the
+                # blocked() check at the top of handle runs before any dispatch).
+                if self.guard is not None and not rule.get("skip_guard"):
                     self._guard_record(outcome, dest, rendered)
 
         log.info("handled %s/%s -> %s", event.kind, event.action, sent)

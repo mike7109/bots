@@ -199,6 +199,38 @@ def test_handle_records_activity_log_on_sent(settings, store):
     assert len(rows) == 1 and rows[0]["channel"] == "room"
 
 
+class RecordingGuard:
+    """Guard fake: never blocked, records every _guard_record target key."""
+    def __init__(self):
+        self.records = []
+
+    def blocked(self):
+        return False
+
+    def record(self, key, rendered):
+        self.records.append(key)
+
+
+def test_handle_records_sent_with_guard_by_default(settings):
+    g = RecordingGuard()
+    t = FakeTransport(outcome={"room": "!r", "event_id": "$1"})
+    config = {"rules": [{"event": "issue", "template": "t", "to": ["room"]}], "defaults": {}}
+    Engine(config, FakeRenderer(), {"room": t}, settings=settings, guard=g).handle(issue_event())
+    assert g.records == ["!r"]                       # normal rule counts toward the breaker
+
+
+def test_handle_skip_guard_rule_is_not_recorded(settings):
+    # A `skip_guard` rule (thread-anchor header) delivers but never pushes the
+    # per-target count toward a breaker trip.
+    g = RecordingGuard()
+    t = FakeTransport(outcome={"room": "!r", "event_id": "$1"})
+    config = {"rules": [{"event": "issue", "template": "t", "to": ["room"], "skip_guard": True}],
+              "defaults": {}}
+    result = Engine(config, FakeRenderer(), {"room": t}, settings=settings, guard=g).handle(issue_event())
+    assert result["sent"] == ["room"]                # still delivered
+    assert g.records == []                           # but not counted
+
+
 def test_handle_picks_template_variant_by_medium(settings):
     room = FakeTransport(medium="matrix")
     renderer = FakeRenderer()

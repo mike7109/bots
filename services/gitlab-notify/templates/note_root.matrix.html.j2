@@ -1,0 +1,1 @@
+{% set shown = display_labels(labels) %}{% if shown %}{{ labels_html(shown) }}<br>{% endif %}🚩 <b>Комментарии к задаче</b> · <a href="{{ url | safe_url }}">#{{ iid }}</a> <b>{{ title | truncate(120, true, '…', 0) }}</b>

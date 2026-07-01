@@ -5,6 +5,7 @@ this file only verifies the webhook, normalizes the payload, and hands the
 event to the engine.
 """
 import asyncio
+import dataclasses
 import hmac
 import logging
 import pathlib
@@ -123,24 +124,38 @@ async def webhook(request: Request, x_gitlab_token: str = Header(default="")):
             continue
         event.room = rm
         event.extra = {"watched": True}
-        # Thread comments of ONE issue together (per room): the first comment is
-        # posted normally and becomes the thread root; later comments carry its
-        # event id so clients nest them under it. Keyed by iid (stable across a
-        # rename) — renaming the issue never breaks the thread. Require a real iid
-        # so a malformed (iid-less) payload can't collapse distinct issues into
-        # one thread. A store fault must NEVER break delivery — degrade to "no
-        # threading" (mirrors engine.py, where store bookkeeping can't sink a send).
+        # Thread comments of ONE issue together (per room). So even the FIRST
+        # comment already sits in a thread, post a small top-level "header"
+        # (note_root) as the thread root, then nest every comment under it. Keyed
+        # by iid (stable across a rename) — renaming never breaks the thread; a
+        # real iid is required so a malformed (iid-less) payload can't collapse
+        # distinct issues into one thread. Store faults NEVER break delivery
+        # (mirrors engine.py, where store bookkeeping can't sink a send).
         tkey = f"{event.project}#{event.iid}@{rm}" if (event.kind == "note" and event.iid) else None
+        root_eid = None
         if tkey:
             try:
                 root = ctx.store.get_state("note_thread", tkey)
                 if root and root.get("event_id"):
-                    event.extra["thread_root"] = root["event_id"]
+                    root_eid = root["event_id"]
             except Exception:                       # noqa: BLE001 — threading is best-effort
                 log.exception("note-thread lookup failed")
+            if not root_eid:                        # first comment: post the anchor header
+                header = dataclasses.replace(event, kind="note_root", room=rm, extra={})
+                hres = ctx.engine.handle(header)
+                root_eid = hres.get("event_id") if isinstance(hres, dict) else None
+                if root_eid:
+                    try:
+                        ctx.store.set_state("note_thread", tkey, {"event_id": root_eid})
+                    except Exception:               # noqa: BLE001 — threading is best-effort
+                        log.exception("note-thread store failed")
+            if root_eid:
+                event.extra["thread_root"] = root_eid
         res = ctx.engine.handle(event)
         results[f"watch:{rm}"] = res
-        if tkey and not event.extra.get("thread_root") and isinstance(res, dict) and res.get("event_id"):
+        # Fallback: the anchor couldn't post (kill switch / breaker) — let the
+        # comment itself become the root so a later comment can still thread.
+        if tkey and not root_eid and isinstance(res, dict) and res.get("event_id"):
             try:
                 ctx.store.set_state("note_thread", tkey, {"event_id": res["event_id"]})
             except Exception:                       # noqa: BLE001 — threading is best-effort
