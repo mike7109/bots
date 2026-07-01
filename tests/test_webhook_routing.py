@@ -32,11 +32,14 @@ class FakeEngine:
         self.calls = []
 
     def handle(self, event):
-        self.calls.append({
+        rec = {
             "room": event.room,
             "action": event.action,
             "watched": bool((event.extra or {}).get("watched")),
-        })
+        }
+        if event.kind == "note":                     # note-only field; issue recs stay 3-key
+            rec["comment"] = event.comment
+        self.calls.append(rec)
         return {"sent": [event.room]}
 
 
@@ -147,3 +150,57 @@ def test_watch_room_equal_to_default_not_double_posted(settings, monkeypatch):
     _call(ctx, _payload("open", labels=("security",)))
     # same room as default -> posted once (as the default, not watched)
     assert ctx.engine.calls == [{"room": DEFAULT_ROOM, "action": "open", "watched": False}]
+
+
+# --- note (comment) routing: watch-rooms only, throttled ---------------
+def _note_payload(labels=("security",), note="готово @m.bahmutskij",
+                  action="create", system=False, noteable="Issue"):
+    return {
+        "object_kind": "note",
+        "object_attributes": {"noteable_type": noteable, "action": action,
+                              "system": system, "note": note,
+                              "url": "https://gl/7#note_1"},
+        "issue": {"iid": 7, "title": "X", "labels": [{"title": t} for t in labels]},
+        "project": {"path_with_namespace": PROJECT},
+        "user": {"username": "d.nikulin"},
+    }
+
+
+def test_note_on_watched_goes_only_to_watch_room(settings, monkeypatch):
+    settings.set_watched([{"name": "Sec", "tags": ["security"], "rooms": ["!sec:srv"]}])
+    ctx = _ctx(settings)                              # a real source room exists
+    monkeypatch.setattr(app_module, "ctx", ctx)
+    _call(ctx, _note_payload())
+    # never the source room — only the watch room, marked watched, with the comment.
+    assert ctx.engine.calls == [
+        {"room": "!sec:srv", "action": "create", "watched": True, "comment": "готово @m.bahmutskij"},
+    ]
+
+
+def test_note_without_watched_match_ignored(settings, monkeypatch):
+    ctx = _ctx(settings)
+    monkeypatch.setattr(app_module, "ctx", ctx)
+    res = _call(ctx, _note_payload(labels=("bug",)))
+    assert ctx.engine.calls == []
+    assert "ignored" in res and "no watched match" in res["ignored"]
+
+
+def test_note_system_and_edit_are_unhandled(settings, monkeypatch):
+    ctx = _ctx(settings)
+    monkeypatch.setattr(app_module, "ctx", ctx)
+    for payload in (_note_payload(system=True), _note_payload(action="update")):
+        res = _call(ctx, payload)
+        assert res == {"ignored": "unhandled event: note"}
+    assert ctx.engine.calls == []
+
+
+def test_note_burst_is_throttled_before_the_breaker(settings, monkeypatch):
+    # guard defaults: max_per_target=5 -> note cap=4; the 5th comment to the room
+    # is shed BEFORE engine.handle (so it never records toward the global breaker).
+    settings.set_watched([{"name": "Sec", "tags": ["security"], "rooms": ["!sec:srv"]}])
+    ctx = _ctx(settings)
+    monkeypatch.setattr(app_module, "ctx", ctx)
+    for _ in range(5):
+        res = _call(ctx, _note_payload())
+    assert len(ctx.engine.calls) == 4                # only 4 delivered
+    assert any(k.startswith("throttled:") for k in res["results"])

@@ -47,6 +47,9 @@ def build_context() -> AppContext:
     # the admin "which 🏷 to show" setting. Registered here (not in botkit) so the
     # generic renderer stays settings-agnostic; reads the DB live on each render.
     renderer.env.globals["display_labels"] = settings.display_labels
+    # Comment truncation for watched-issue note notifications (chars + lines, live
+    # admin config). Same rationale as display_labels — kept out of botkit.
+    renderer.env.globals["clip_comment"] = settings.clip_comment
 
     # Matrix homeserver/token come from settings (DB; seeded from env once) so
     # they're admin-managed; not required at boot — the panel configures them.

@@ -84,15 +84,17 @@ async def webhook(request: Request, x_gitlab_token: str = Header(default="")):
             if rm not in watch_rooms:
                 watch_rooms.append(rm)
 
-    # Multi-group routing: the matching source's room. `update` events are too
-    # noisy for the normal channel, so they go ONLY to watch rooms; open/close/
-    # reopen also post to the source room (as before).
+    # Multi-group routing: the matching source's room. `update` (issue edits) and
+    # `note` (new comments) are too noisy / watch-scoped for the normal channel, so
+    # they go ONLY to watch rooms; open/close/reopen also post to the source room
+    # (as before).
     src = ctx.sources.match_path(event.project)
     default_room = src.get("room") if src else None
-    post_default = event.action != "update" and bool(default_room)
+    watch_only = event.kind == "note" or event.action == "update"
+    post_default = not watch_only and bool(default_room)
 
     if not post_default and not watch_rooms:
-        reason = "no source for project" if event.action != "update" else "update: no watched match"
+        reason = "no watched match" if watch_only else "no source for project"
         return {"ignored": f"{reason} {event.project}".strip()}
 
     # Optional: quiet realtime issue-events outside the active-hours window too
@@ -110,6 +112,13 @@ async def webhook(request: Request, x_gitlab_token: str = Header(default="")):
         results["default"] = ctx.engine.handle(event)
     for rm in watch_rooms:
         if post_default and rm == default_room:
+            continue
+        # SAFETY: comments arrive one webhook each; a chatty watched issue could
+        # otherwise push the room past the guard's per-target cap and trip the
+        # GLOBAL breaker (halting ALL sending). Shed excess BEFORE handle (no
+        # guard.record) — the dropped comments stay readable in GitLab.
+        if event.kind == "note" and not ctx.settings.note_send_allowed(rm):
+            results[f"throttled:{rm}"] = {"ignored": "throttled"}
             continue
         event.room = rm
         event.extra = {"watched": True}

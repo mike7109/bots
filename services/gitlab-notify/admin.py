@@ -68,6 +68,7 @@ SAMPLE_CTX = {
     "title": "Пример: продлить TLS-сертификаты", "url": "https://gitlab.local/qa/infra/-/issues/42",
     "state": "opened", "labels": ["infra", "security"],
     "assignees": ["misha", "d.nikulin"], "author": "misha", "due": "2026-06-10",
+    "comment": "Пример комментария к задаче.\nВторая строка для предпросмотра.",
     "extra": {
         "mode": "full", "date": "2026-06-05", "total": 3, "open_total": 9, "days": 14,
         "window": 7, "throughput": 5, "wip": 2, "age_med": 4, "cycle_p85": 12,
@@ -257,6 +258,7 @@ def create_admin_router(ctx) -> list[APIRouter]:
             "stats": ctx.store.log_stats(7),
             "alerts": settings.get_alerts(),
             "label_display": settings.get_label_display(),   # 🏷 which labels to show
+            "note": settings.get_note(),                     # 💬 comment truncation config
             "watched": settings.get_watched(),               # ⭐ special-tag -> rooms rules
             "poke": settings.get_poke(),            # anti-spam cfg for /api/poke
             "breaker": settings.get_breaker(),      # SAFETY: tripped flag + reason
@@ -312,6 +314,13 @@ def create_admin_router(ctx) -> list[APIRouter]:
         if isinstance(body.get("allow"), list):
             patch["allow"] = body["allow"]
         return settings.update_label_display(patch)
+
+    @router.post("/api/note")
+    async def set_note(request: Request):
+        """Update comment-notification truncation ({enabled, max_chars, max_lines});
+        returns the effective (clamped) config."""
+        body = await request.json()
+        return settings.update_note(body if isinstance(body, dict) else {})
 
     @router.post("/api/watched")
     async def set_watched(request: Request):

@@ -24,3 +24,5 @@ class Event:
     due: str | None = None          # ISO date, for due_soon
     room: str | None = None         # target room override (multi-source routing); else defaults
     extra: dict = field(default_factory=dict)  # anything source-specific
+    comment: str = ""               # note/comment body (kind == "note")
+    mention_logins: list[str] = field(default_factory=list)  # @-mentioned logins to ping (transport resolves)

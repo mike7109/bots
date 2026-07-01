@@ -48,7 +48,7 @@ def test_registry_covers_scheduled_passes_plus_issue_webhook():
     # Registry order is preserved; scheduled subset == cron.PASSES; the one
     # webhook entry is "issue" (no schedule). The old anchor-dual digest/team are
     # gone, replaced by the four split passes.
-    assert list(passes.REGISTRY) == [*EXPECTED_PASSES, "issue"]
+    assert list(passes.REGISTRY) == [*EXPECTED_PASSES, "issue", "note"]
     assert passes.scheduled() == EXPECTED_PASSES == cron.PASSES
     assert passes.daily() == EXPECTED_DAILY == cron.DAILY
     assert "digest" not in passes.REGISTRY and "team" not in passes.REGISTRY
@@ -57,6 +57,13 @@ def test_registry_covers_scheduled_passes_plus_issue_webhook():
     assert issue.run is None
     assert issue.schedule_defaults == {}
     assert "issue" not in passes.scheduled()
+    # The note (comment) webhook pass: webhook-triggered, no schedule/run, pings
+    # only @-mentioned users, goes to a room — never joins the scheduled set.
+    note = passes.REGISTRY["note"]
+    assert note.trigger == "webhook" and note.run is None
+    assert note.event_kind == "note" and note.mention == "mentioned"
+    assert note.to == ("room",)
+    assert "note" not in passes.scheduled()
 
 
 # --- (a2) the four split passes have the right metadata ------------------

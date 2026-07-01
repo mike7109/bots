@@ -18,7 +18,7 @@ GitLab (issue / коммент)
 
 | Сервис | Порт (127.0.0.1) | Webhook URL | Триггер |
 |---|---|---|---|
-| `gitlab-notify` | `8081` | `http://127.0.0.1:8081/webhook` | Issues events |
+| `gitlab-notify` | `8081` | `http://127.0.0.1:8081/webhook` | Issues + Comments (Note) |
 | `gitlab-expand-tasks` | `8080` | `http://127.0.0.1:8080/webhook` | Comments (Note) |
 
 ## 0. Предусловия (один раз)

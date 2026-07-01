@@ -6,7 +6,7 @@ const TABS=[["dash","Дашборд"],["src","Группы"],["users","Полу�
 const PASS_ICON={
   due:'📅', overdue:'⏰',
   digest_full:'📋', digest_delta:'📋', team_full:'🗓', team_delta:'🗓',
-  triage:'🧹', stale:'🕸', metrics:'📊',
+  triage:'🧹', stale:'🕸', metrics:'📊', note:'💬',
 };
 const CAT_ICON={group:'🗓', personal:'📋'};
 function passIcon(p,meta){return PASS_ICON[p]||CAT_ICON[(meta&&meta.category)]||'•';}
@@ -16,6 +16,7 @@ let UF='all';
 // Человеческие названия и описания вместо технических кодов событий.
 const KIND={
   issue:{t:'Открытие / закрытие issue',d:'Issue открыли, закрыли или переоткрыли (вебхук) → в общую комнату.'},
+  note:{t:'Комментарии к особым issue',d:'Новый комментарий к особой issue (по тегам) → только в её комнаты (⭐).'},
   due_soon:{t:'Дедлайн завтра',d:'У issue срок наступает завтра → в общую комнату.'},
   overdue:{t:'Просрочка',d:'Срок задачи уже прошёл → в личку исполнителю.'},
   digest_personal:{t:'Личный дайджест',d:'Личные задачи человеку «что на тебе» → в личку.'},
@@ -81,6 +82,7 @@ async function load(){
   renderActiveHours(s.active_hours);
   renderQuietAfterFull();
   renderLabelDisplay();
+  renderNoteSettings();
   renderWatched();
   renderSources();
   renderConn(s.conn);
@@ -369,7 +371,7 @@ function dayRange(days){
   return s.map(i=>DAYS[i]).join(', ');
 }
 function passSummary(p,c,wh){
-  if(wh)return 'по событию issue (open/close/reopen)';
+  if(wh)return p==='note'?'новый комментарий к особой issue':'по событию issue (open/close/reopen)';
   if(c.kind==='interval'){
     const ev=c.every_hours==null?2:c.every_hours, th=c.change_threshold==null?5:c.change_threshold;
     return `каждые ${ev} ч · при ≥${th} изм.`;
@@ -537,6 +539,26 @@ function renderLabelDisplay(){
 async function saveLabelDisplay(){
   const allow=$('ldAllow').value.split('\n').map(s=>s.trim()).filter(Boolean);
   await api('/label-display','POST',{enabled:$('ldOn').checked,allow});
+  toast('Сохранено');load();
+}
+// 💬 Комментарии к особым issue: ОБРЕЗКА длинного текста (символы + строки).
+// #noteOn = обрезать ли (не «показывать»: вкл/выкл самих уведомлений — в «Рассылки»).
+// Выключенная обрезка => лимиты не применяются (потолок 4000/50), поэтому поля гасим.
+function noteToggleInputs(){
+  const off=!$('noteOn').checked;
+  $('noteMaxChars').disabled=off;
+  $('noteMaxLines').disabled=off;
+}
+function renderNoteSettings(){
+  const d=(S&&S.note)||{enabled:true,max_chars:500,max_lines:8};
+  $('noteOn').checked=!!d.enabled;
+  $('noteMaxChars').value=d.max_chars;
+  $('noteMaxLines').value=d.max_lines;
+  noteToggleInputs();
+}
+async function saveNoteSettings(){
+  await api('/note','POST',{enabled:$('noteOn').checked,
+    max_chars:+$('noteMaxChars').value, max_lines:+$('noteMaxLines').value});
   toast('Сохранено');load();
 }
 // ⭐ Особые issue: правила «теги -> комнаты». Список карточек (как Группы), но

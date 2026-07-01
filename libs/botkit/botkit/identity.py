@@ -26,6 +26,13 @@ class Identity:
             return f"@{login}:{self._domain}"
         return None
 
+    def known_matrix_id(self, login: str | None) -> str | None:
+        """Configured mxid for a login, WITHOUT the @login:domain fallback — so an
+        unknown/typo'd/group @mention resolves to None (no ghost ping)."""
+        if not login:
+            return None
+        return (self._users.get(login) or {}).get("matrix")
+
     def email(self, login: str | None) -> str | None:
         if not login:
             return None

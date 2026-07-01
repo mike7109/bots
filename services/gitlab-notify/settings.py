@@ -13,14 +13,27 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import re
+import time
 
 from botkit.config import env
+from botkit.notify.render import _safe_url   # no cycle: render imports neither settings nor app
+from markupsafe import Markup, escape
 
 import keys
 import passes
 import workcal
 
 log = logging.getLogger("gitlab-notify.settings")
+
+# Comment (note) rendering: hard ceilings clamp both the persisted admin config
+# and the render-time truncation, so a giant pasted comment can never blast a
+# room even if truncation is toggled off. `_IMG_MD` collapses image markdown to a
+# placeholder before clipping/escaping (Matrix wouldn't render it anyway).
+_NOTE_HARD_CHARS = 4000
+_NOTE_HARD_LINES = 50
+_NOTE_CAPS = {"max_chars": _NOTE_HARD_CHARS, "max_lines": _NOTE_HARD_LINES}
+_IMG_MD = re.compile(r"!\[[^\]]*\]\([^)]*\)")
 
 # Connection settings the admin can override (DB wins over the env default).
 CONN_FIELDS = {
@@ -427,6 +440,86 @@ class Settings:
             return list(labels or [])
         allow = set(cfg["allow"])
         return [lbl for lbl in (labels or []) if lbl in allow]
+
+    # --- comment (note) notifications for watched issues ------------------
+    # How much of a NEW comment on a watched issue is shown in Matrix. Admin-
+    # managed + live (mirrors label-display). Truncation happens at render time
+    # via the clip_comment() Jinja global. Values are CLAMPED to a hard ceiling at
+    # the setter so the persisted/displayed number always equals the effective one.
+    NOTE_DEFAULTS = {"enabled": True, "max_chars": 500, "max_lines": 8}
+
+    def get_note(self) -> dict:
+        stored = self.store.get_state(_KIND, "note") or {}
+        out = {}
+        for k, default in self.NOTE_DEFAULTS.items():
+            v = stored.get(k, default)
+            if isinstance(default, bool):
+                out[k] = bool(v)
+            else:
+                try:
+                    out[k] = min(_NOTE_CAPS[k], max(1, int(v)))   # displayed == effective
+                except (ValueError, TypeError):
+                    out[k] = default
+        return out
+
+    def update_note(self, patch: dict) -> dict:
+        cur = self.store.get_state(_KIND, "note") or {}
+        for k, default in self.NOTE_DEFAULTS.items():
+            if k not in patch:
+                continue
+            if isinstance(default, bool):
+                cur[k] = bool(patch[k])
+            else:
+                try:
+                    cur[k] = min(_NOTE_CAPS[k], max(1, int(patch[k])))
+                except (ValueError, TypeError):
+                    pass                                  # ignore garbage, keep prior/default
+        self.store.set_state(_KIND, "note", cur)
+        return self.get_note()
+
+    def clip_comment(self, text, url="") -> Markup:
+        """Render a comment body for Matrix: image-md -> 🖼, clip by chars AND
+        lines, single-pass escape, \\n -> <br>, ✂️ marker + link when truncated.
+        Returns Markup (autoescape is ON) so the template uses a bare {{ }} — no
+        |safe. Clip the RAW text FIRST, then escape, so truncation never splits an
+        HTML entity. The hard ceiling applies even when truncation is toggled off."""
+        cfg = self.get_note()
+        raw = _IMG_MD.sub("\U0001f5bc", str(text or ""))
+        if cfg["enabled"]:
+            max_chars, max_lines = cfg["max_chars"], cfg["max_lines"]
+        else:
+            max_chars, max_lines = _NOTE_HARD_CHARS, _NOTE_HARD_LINES
+        truncated = False
+        lines = raw.split("\n")
+        if len(lines) > max_lines:
+            raw = "\n".join(lines[:max_lines])
+            truncated = True
+        if len(raw) > max_chars:
+            raw = raw[:max_chars].rstrip()
+            truncated = True
+        body = Markup(str(escape(raw)).replace("\n", "<br>"))     # escape RAW first, THEN \n->br
+        if truncated:
+            body += Markup(f' … ✂️ (обрезано — <a href="{escape(_safe_url(url))}">в GitLab</a>)')
+        return body
+
+    def note_send_allowed(self, room: str, *, now: float | None = None) -> bool:
+        """Soft per-room throttle for comment notifications, applied BEFORE the send
+        with NO guard.record on shed, so a chatty watched issue can never be the
+        message that trips the global breaker. Auto-derived from the guard: caps one
+        below the per-target limit over the same window (no separate config to
+        misconfigure); inert when the guard is disabled (nothing to protect)."""
+        g = self.get_guard()
+        if not g["enabled"]:
+            return True
+        cap = max(1, g["max_per_target"] - 1)
+        win = max(1, g["target_window_s"])
+        now = time.time() if now is None else now
+        rate = self.store.get_state("note_rate", room) or {"ts": []}
+        recent = [t for t in rate.get("ts", []) if (now - float(t)) < win]
+        if len(recent) >= cap:
+            return False
+        self.store.set_state("note_rate", room, {"ts": [*recent, now]})
+        return True
 
     # --- watched issues (special tags -> extra group rooms) ---------------
     # A list of rules {id, name, tags[], rooms[], enabled}. An issue carrying ANY

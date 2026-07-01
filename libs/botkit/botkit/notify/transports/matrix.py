@@ -18,12 +18,23 @@ class MatrixTransport:
         if not room:
             raise RuntimeError("room transport: no room_id (set env MATRIX_ROOM or defaults.room_id)")
 
-        # `mention: assignee` in the rule => actually ping every assignee.
+        # Ping recipients per the rule's mention mode:
+        #   assignee  -> event.assignees, resolved WITH the @login:domain fallback
+        #                (assignees are real GitLab users).
+        #   mentioned -> event.mention_logins, resolved WITHOUT fallback so a typo'd
+        #                or group @mention can't ping a ghost mxid and flip the whole
+        #                message to a loud highlight.
         mentions: list[str] = []
-        if rule.get("mention") == "assignee" and self.identity:
-            for login in event.assignees:
-                mxid = self.identity.matrix_id(login)
-                if mxid:
+        if self.identity:
+            mode = rule.get("mention")
+            logins, resolve = [], None
+            if mode == "assignee":
+                logins, resolve = event.assignees, self.identity.matrix_id
+            elif mode == "mentioned":
+                logins, resolve = event.mention_logins, self.identity.known_matrix_id
+            for login in logins:
+                mxid = resolve(login) if resolve else None
+                if mxid and mxid not in mentions:
                     mentions.append(mxid)
 
         self.client.send_html(

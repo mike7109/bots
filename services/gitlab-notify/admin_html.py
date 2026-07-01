@@ -125,6 +125,17 @@ HTML = r"""<!doctype html>
       <textarea id="ldAllow" placeholder="security&#10;priority::high&#10;bug"></textarea>
       <div class="row"><button class="primary" onclick="saveLabelDisplay()">Сохранить</button></div>
     </div>
+    <div class="card"><h2>💬 Комментарии к особым issue</h2>
+      <p class="hint">Когда к <b>особой</b> issue (по тегам слежки выше) добавляют новый комментарий, копия уходит только в её комнаты (⭐) — обычную комнату не спамим. Пингуются лишь те, кого явно упомянули <span class="mono">@логином</span> и кто есть в «Получателях». <b>Включить/выключить сами уведомления</b> — в разделе «Рассылки» → «Вебхуки» → «Комментарии к особым issue». Здесь — только как обрезать длинный текст.</p>
+      <div class="row"><span class="mut">Обрезать длинные комментарии</span>
+        <span class="switch"><input type="checkbox" id="noteOn" onchange="noteToggleInputs()"><span class="slider"></span></span></div>
+      <p class="hint" style="margin:0 0 8px">Выключено — показываем комментарий целиком (до жёсткого потолка 4000 символов / 50 строк).</p>
+      <div class="row"><span class="mut">Обрезать до, символов (≤ 4000)</span>
+        <input type="number" id="noteMaxChars" min="1" max="4000" style="width:110px"></div>
+      <div class="row"><span class="mut">Обрезать до, строк (≤ 50)</span>
+        <input type="number" id="noteMaxLines" min="1" max="50" style="width:110px"></div>
+      <div class="row"><button class="primary" onclick="saveNoteSettings()">Сохранить</button></div>
+    </div>
     <div class="card"><h2>⭐ Особые issue — слать в выбранные группы</h2>
       <p class="hint">Issue с определёнными метками — особые, за ними следим пристально. Каждое правило: набор тегов → набор комнат Matrix. Если у issue есть <b>любой</b> из тегов правила, копия уведомления уходит в его комнаты (дополнительно к обычной общей комнате). Работает даже для проектов без настроенной группы. Реагирует на открытие/закрытие/переоткрытие, а также на <b>изменения</b> (правки/смена меток) — изменения идут <b>только</b> в эти комнаты, обычную не спамят.</p>
       <p class="hint" style="margin:0 0 12px">Комната — это её Matrix room id вида <span class="mono">!abcdef:fakspro.ru</span>. Бот должен состоять в комнате. Особые уведомления помечаются ⭐.</p>

@@ -4,6 +4,7 @@ from __future__ import annotations
 import datetime as dt
 
 import pytest
+from markupsafe import Markup
 
 from botkit.store import Store
 from settings import ACTIVE_HOURS_DEFAULTS, PASS_DEFAULTS, Settings
@@ -409,3 +410,97 @@ def test_watched_targets_skips_disabled_and_roomless(settings):
 def test_watched_persists_across_restart(settings, store):
     settings.set_watched([{"name": "Sec", "tags": ["security"], "rooms": ["!sec:s"]}])
     assert Settings(store).watched_targets(["security"])[0]["name"] == "Sec"
+
+
+# --- note (comment) truncation config ---------------------------------
+def test_note_defaults(settings):
+    assert settings.get_note() == {"enabled": True, "max_chars": 500, "max_lines": 8}
+
+
+def test_note_update_and_roundtrip(settings, store):
+    eff = settings.update_note({"enabled": False, "max_chars": 120})
+    assert eff["enabled"] is False and eff["max_chars"] == 120
+    assert eff["max_lines"] == 8                              # untouched -> default
+    assert Settings(store).get_note()["max_chars"] == 120
+
+
+def test_note_clamps_to_ceiling(settings):
+    settings.update_note({"max_chars": 99999, "max_lines": 999})
+    n = settings.get_note()
+    assert n["max_chars"] == 4000 and n["max_lines"] == 50    # hard ceiling
+    settings.update_note({"max_chars": 0, "max_lines": -3})
+    n = settings.get_note()
+    assert n["max_chars"] == 1 and n["max_lines"] == 1        # floor at 1 (never empty)
+
+
+def test_note_update_ignores_garbage(settings):
+    settings.update_note({"max_chars": "oops"})
+    assert settings.get_note()["max_chars"] == 500            # kept at default
+
+
+def test_clip_comment_short_is_untouched_and_markup(settings):
+    out = settings.clip_comment("строка1\nстрока2", "https://gl/7#note_1")
+    assert isinstance(out, Markup)
+    assert str(out) == "строка1<br>строка2"                   # \n -> <br>, no marker
+
+
+def test_clip_comment_escapes_html(settings):
+    out = str(settings.clip_comment("<script>alert(1)</script>", ""))
+    assert "<script>" not in out and "&lt;script&gt;" in out  # escaped once
+
+
+def test_clip_comment_truncates_by_chars(settings):
+    settings.update_note({"max_chars": 10})
+    out = str(settings.clip_comment("a" * 50, "https://gl/7#note_1"))
+    assert "✂️ (обрезано" in out and "href=" in out
+    assert out.startswith("a" * 10) and not out.startswith("a" * 11)   # exactly 10 body chars
+
+
+def test_clip_comment_truncates_by_lines(settings):
+    settings.update_note({"max_lines": 3})
+    out = str(settings.clip_comment("\n".join(f"l{i}" for i in range(10)), ""))
+    assert "✂️ (обрезано" in out
+    assert "l0<br>l1<br>l2" in out and "l3" not in out
+
+
+def test_clip_comment_image_markdown_to_emoji(settings):
+    out = str(settings.clip_comment("см ![скрин](http://x/y.png) тут", ""))
+    assert "\U0001f5bc" in out and "![" not in out and "](" not in out
+
+
+def test_clip_comment_ceiling_applies_when_disabled(settings):
+    settings.update_note({"enabled": False})
+    assert str(settings.clip_comment("hi", "")) == "hi"       # short -> full, no marker
+    out = str(settings.clip_comment("z" * 5000, ""))          # over the 4000 hard ceiling
+    assert "✂️ (обрезано" in out and out.count("z") == 4000
+
+
+def test_clip_comment_blocks_dangerous_url(settings):
+    settings.update_note({"max_chars": 3})
+    out = str(settings.clip_comment("hello", "javascript:alert(1)"))
+    assert 'href="#"' in out                                  # _safe_url neutralised the scheme
+
+
+# --- note per-room throttle (breaker-safe) ----------------------------
+def test_note_send_allowed_sheds_above_cap(settings):
+    # cap = max_per_target - 1 = 4; the 5th send to the same room is shed.
+    room = "!sec:s"
+    assert [settings.note_send_allowed(room) for _ in range(5)] == [True, True, True, True, False]
+
+
+def test_note_send_allowed_cap_below_breaker(settings):
+    # A legit comment can never be the send that trips the per-target breaker.
+    cap = max(1, settings.get_guard()["max_per_target"] - 1)
+    assert cap < settings.get_guard()["max_per_target"]
+
+
+def test_note_send_allowed_rooms_independent(settings):
+    for _ in range(4):
+        settings.note_send_allowed("!a:s")
+    assert settings.note_send_allowed("!a:s") is False        # !a:s exhausted
+    assert settings.note_send_allowed("!b:s") is True         # independent budget
+
+
+def test_note_send_allowed_inert_when_guard_off(settings):
+    settings.update_guard({"enabled": False})
+    assert all(settings.note_send_allowed("!x:s") for _ in range(20))   # nothing to protect

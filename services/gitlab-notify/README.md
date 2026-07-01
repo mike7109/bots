@@ -20,6 +20,7 @@
 | Источник | События | Шаблон | Куда (`to`) |
 |---|---|---|---|
 | Webhook (мгновенно) | issue открыта / закрыта / переоткрыта | `issue` | `room` |
+| Webhook (мгновенно) | новый комментарий к **особой** issue (по тегам) → только в её комнаты ⭐ | `note` | `room` |
 | Cron (раз в день) | дедлайн задачи — **завтра** | `due_soon` | `room` |
 | Cron (раз в день) | задача **просрочена** | `overdue` | `dm` (🔕 выкл.) |
 
@@ -126,7 +127,9 @@ curl -s localhost:8081/healthz
 1. Проект или группа FAKSPRO → **Settings → Webhooks → Add new webhook**:
    - **URL:** `http://127.0.0.1:8081/webhook`
    - **Secret token:** = `WEBHOOK_SECRET`
-   - **Trigger:** ✅ Issues events
+   - **Trigger:** ✅ Issues events + ✅ Comments (Note) events
+     (без галочки «Comments» комментарии к особым issue не придут — GitLab не
+     пришлёт note-хук; у уже настроенного вебхука её надо добавить и пересохранить)
    - SSL verification: off (http на localhost)
 2. **Выключить старую встроенную** Matrix-интеграцию (Settings → Integrations →
    Matrix → Active off), иначе будет дубль.

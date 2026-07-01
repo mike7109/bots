@@ -36,6 +36,12 @@ rules:
     to: [room]
     mention: assignee
 
+  - event: note                    # webhook: new comment on a watched (special) issue
+    actions: [create]              # new comments only (edits/system notes dropped in normalize)
+    template: note
+    to: [room]                     # app.py forces watch-rooms-only routing for notes
+    mention: mentioned             # ping ONLY @-mentioned configured users; never auto-ping assignees
+
   - event: due_soon                # cron: due tomorrow -> shared room
     template: due_soon
     to: [room]

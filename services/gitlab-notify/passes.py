@@ -252,6 +252,14 @@ _PASSES = [
         to=("room",), mention="assignee", mode="single", daily=False,
         schedule_defaults={}, run=None,
     ),
+    Pass(
+        name="note", title="Комментарии к особым issue",
+        description="Новый комментарий к особой issue (по тегам) → только в её комнаты (⭐); "
+                    "пинг — только упомянутым @логином.",
+        category="group", trigger="webhook", template="note", event_kind="note",
+        to=("room",), mention="mentioned", mode="single", daily=False,
+        schedule_defaults={}, run=None,
+    ),
 ]
 
 REGISTRY: dict[str, Pass] = {p.name: p for p in _PASSES}
