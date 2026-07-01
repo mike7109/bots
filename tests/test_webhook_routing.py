@@ -140,11 +140,12 @@ def test_open_with_watched_tag_posts_default_and_root_card(settings, monkeypatch
     ctx = _ctx(settings)
     monkeypatch.setattr(app_module, "ctx", ctx)
     _call(ctx, _payload("open", labels=("security",)))
-    # source room: standalone open; watch room: the thread ROOT card only (no
-    # separate "opened" line — the card IS the open notification).
+    # source room: standalone open; watch room: the thread ROOT card + a "🟢 Открыта"
+    # nested under it (so Element renders the topic straight away, not a lone card).
     assert ctx.engine.calls == [
         {"kind": "issue", "room": DEFAULT_ROOM, "action": "open", "watched": False},
         {"kind": "issue_root", "room": "!sec:srv", "action": "open", "watched": True},
+        {"kind": "issue", "room": "!sec:srv", "action": "open", "watched": True},   # nested open
     ]
     assert ctx.store.get_state("issue_thread", f"{PROJECT}#7@!sec:srv") == {"event_id": "$evt2"}
 
@@ -210,7 +211,9 @@ def test_watched_works_without_source(settings, monkeypatch):
     monkeypatch.setattr(app_module, "ctx", ctx)
     _call(ctx, _payload("open", labels=("security",)))
     assert ctx.engine.calls == [
-        {"kind": "issue_root", "room": "!sec:srv", "action": "open", "watched": True}]
+        {"kind": "issue_root", "room": "!sec:srv", "action": "open", "watched": True},
+        {"kind": "issue", "room": "!sec:srv", "action": "open", "watched": True},   # nested open
+    ]
 
 
 def test_watch_room_equal_to_default_not_double_posted(settings, monkeypatch):

@@ -28,11 +28,12 @@ users:
 # NB: the key is `event:` (not `on:`) — YAML reads a bare `on` as boolean True.
 rules:
   - event: issue                   # webhook: issue opened/closed/reopened
-    # Main source room gets these standalone; a watched issue also gets close/
-    # reopen nested into its thread (app.py). `open` is NOT threaded as an `issue`
-    # message — the watched thread's ROOT card (issue_root) is the open notice.
-    # `update` never renders via this template: app.py turns a watched-issue update
-    # into an `issue_change` (assignee/due only) or drops it (labels/rename).
+    # Main source room gets these standalone; a watched issue also nests open/
+    # close/reopen into its thread under the root card (app.py). `open` is nested
+    # too so the topic renders immediately (a Matrix thread needs ≥1 reply under
+    # the root). `update` never renders via this template: app.py turns a watched-
+    # issue update into an `issue_change` (assignee/due only) or drops it (labels/
+    # rename).
     actions: [open, close, reopen]
     template: issue
     to: [room]

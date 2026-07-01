@@ -97,15 +97,18 @@ def _ensure_thread_root(event, rm: str, tkey: str | None):
 
 def _thread_body_kind(event) -> str | None:
     """What (if anything) a watched issue's thread posts for THIS event:
-      note          -> the comment                     (kind "note")
-      close/reopen  -> the state change, issue template (kind "issue")
-      update        -> ONLY a real assignee/due change  (kind "issue_change")
-      open / label-only or rename update -> None (the root card is the sole notice;
-                       other edits stay silent — the root may still have just been
-                       lazily created by the caller)."""
+      note              -> the comment                     (kind "note")
+      open/close/reopen -> the state change, issue template (kind "issue")
+      update            -> ONLY a real assignee/due change  (kind "issue_change")
+      label-only or rename update -> None (nothing to nest; the root may still
+                           have just been lazily created by the caller).
+
+    `open` DOES nest a "🟢 Открыта" under the root card on purpose: a Matrix thread
+    only renders as a topic once ≥1 message nests under the root, so without it a
+    freshly-created issue would show as a lone top-level card, not a topic."""
     if event.kind == "note":
         return "note"
-    if event.action in ("close", "reopen"):
+    if event.action in ("open", "close", "reopen"):
         return "issue"
     if event.action == "update" and (event.changes.get("assignees") or event.changes.get("due_date")):
         return "issue_change"
