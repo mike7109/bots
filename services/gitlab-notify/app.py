@@ -28,6 +28,7 @@ logging.basicConfig(
     level=env("LOG_LEVEL", "INFO"),
     format="%(asctime)s %(levelname)s %(message)s",
 )
+log = logging.getLogger("gitlab-notify")
 
 ctx = build_context()   # webhook secret is read per-request from settings (DB over env)
 
@@ -122,7 +123,28 @@ async def webhook(request: Request, x_gitlab_token: str = Header(default="")):
             continue
         event.room = rm
         event.extra = {"watched": True}
-        results[f"watch:{rm}"] = ctx.engine.handle(event)
+        # Thread comments of ONE issue together (per room): the first comment is
+        # posted normally and becomes the thread root; later comments carry its
+        # event id so clients nest them under it. Keyed by iid (stable across a
+        # rename) — renaming the issue never breaks the thread. Require a real iid
+        # so a malformed (iid-less) payload can't collapse distinct issues into
+        # one thread. A store fault must NEVER break delivery — degrade to "no
+        # threading" (mirrors engine.py, where store bookkeeping can't sink a send).
+        tkey = f"{event.project}#{event.iid}@{rm}" if (event.kind == "note" and event.iid) else None
+        if tkey:
+            try:
+                root = ctx.store.get_state("note_thread", tkey)
+                if root and root.get("event_id"):
+                    event.extra["thread_root"] = root["event_id"]
+            except Exception:                       # noqa: BLE001 — threading is best-effort
+                log.exception("note-thread lookup failed")
+        res = ctx.engine.handle(event)
+        results[f"watch:{rm}"] = res
+        if tkey and not event.extra.get("thread_root") and isinstance(res, dict) and res.get("event_id"):
+            try:
+                ctx.store.set_state("note_thread", tkey, {"event_id": res["event_id"]})
+            except Exception:                       # noqa: BLE001 — threading is best-effort
+                log.exception("note-thread store failed")
     return {"posted": list(results.keys()), "results": results}
 
 

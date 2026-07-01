@@ -46,9 +46,14 @@ class MatrixTransport:
         notice = rule.get("notice")
         if notice is None:
             notice = not mentions
-        self.client.send_html(
+        # Optional threading: a caller can set event.extra["thread_root"] to drop
+        # this message into an existing thread (e.g. all comments of one issue
+        # under the first). Absent -> a normal top-level message (unchanged).
+        thread_root = (getattr(event, "extra", None) or {}).get("thread_root")
+        event_id = self.client.send_html(
             room, rendered,
             mention_user_ids=mentions,
             notice=notice,
+            thread_root=thread_root,
         )
-        return {"room": room, "mentions": mentions}
+        return {"room": room, "mentions": mentions, "event_id": event_id}

@@ -19,15 +19,23 @@ class FakeClient:
     def __init__(self):
         self.sent = []
 
-    def send_html(self, room, html, mention_user_ids=None, notice=True):
+    def send_html(self, room, html, mention_user_ids=None, notice=True, thread_root=None):
         self.sent.append({"room": room, "html": html,
-                          "mentions": list(mention_user_ids or []), "notice": notice})
+                          "mentions": list(mention_user_ids or []), "notice": notice,
+                          "thread_root": thread_root})
+        return "$evt1"
 
 
 def _dispatch(event, rule):
     client = FakeClient()
     MatrixTransport(client, identity=IDENTITY).dispatch(event, rule, "<b>hi</b>", {})
     return client.sent[0]
+
+
+def _dispatch_full(event, rule):
+    client = FakeClient()
+    outcome = MatrixTransport(client, identity=IDENTITY).dispatch(event, rule, "<b>hi</b>", {})
+    return client.sent[0], outcome
 
 
 def test_mentioned_pings_only_known_users():
@@ -71,3 +79,16 @@ def test_assignee_mode_keeps_domain_fallback():
     ev = Event(kind="issue", action="open", room="!r", assignees=["d.nikulin"])
     out = _dispatch(ev, {"mention": "assignee", "room_id": "!r"})
     assert out["mentions"] == ["@d.nikulin:fakspro.ru"]
+
+
+def test_thread_root_from_extra_is_passed_through():
+    ev = Event(kind="note", action="create", room="!r", extra={"thread_root": "$root"})
+    out, outcome = _dispatch_full(ev, {"room_id": "!r"})
+    assert out["thread_root"] == "$root"              # dropped into the thread
+    assert outcome["event_id"] == "$evt1"             # id surfaced for follow-ups
+
+
+def test_no_thread_root_is_top_level():
+    ev = Event(kind="note", action="create", room="!r")   # extra defaults to {}
+    out = _dispatch(ev, {"room_id": "!r"})
+    assert out["thread_root"] is None                 # a normal top-level message

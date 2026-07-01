@@ -44,12 +44,17 @@ class MatrixClient:
         plain: str | None = None,
         mention_user_ids: Iterable[str] | None = None,
         notice: bool = True,
+        thread_root: str | None = None,
     ) -> str | None:
         """Send a formatted message. Returns the new event id.
 
         `notice=True` uses m.notice (the convention for bot output). When you
         actually want to ping people, pass their mxids in `mention_user_ids`
         and set `notice=False` so clients don't suppress the highlight.
+
+        `thread_root` is the event id of a thread's root event: pass it to drop
+        this message into that thread (m.thread relation). The reply-fallback
+        points at the root so non-threaded clients still show it as a reply.
         """
         mentions = [m for m in (mention_user_ids or []) if m]
         content: dict = {
@@ -60,6 +65,13 @@ class MatrixClient:
         }
         if mentions:
             content["m.mentions"] = {"user_ids": mentions}
+        if thread_root:
+            content["m.relates_to"] = {
+                "rel_type": "m.thread",
+                "event_id": thread_root,
+                "is_falling_back": True,
+                "m.in_reply_to": {"event_id": thread_root},
+            }
 
         room = requests.utils.quote(room_id, safe="")
         txn = uuid.uuid4().hex

@@ -114,6 +114,7 @@ class Engine:
         destinations = rule.get("to") or self.defaults.get("to", ["room"])
         ctx = asdict(event)
         sent, skipped, errors = [], [], []
+        event_id = None       # id of the first delivered message (for thread roots)
         for dest in destinations:
             transport = self.transports.get(dest)
             if transport is None:
@@ -141,6 +142,8 @@ class Engine:
                 skipped.append(dest)
             else:
                 sent.append(dest)
+                if event_id is None and isinstance(outcome, dict) and outcome.get("event_id"):
+                    event_id = outcome["event_id"]
                 # SAFETY: record the real delivery(s) with the guard so a runaway
                 # pass trips the breaker. Recording AFTER the send means a trip
                 # stops the NEXT send (this loop and all future handles). Derive a
@@ -156,6 +159,8 @@ class Engine:
         elif skipped and not errors:
             self._record(event, "skipped", ",".join(skipped), f"#{event.iid} {event.title}"[:200])
         result = {"sent": sent}
+        if event_id:
+            result["event_id"] = event_id       # lets a caller thread follow-ups under it
         if skipped:
             result["skipped"] = skipped
         if errors:

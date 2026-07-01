@@ -30,17 +30,32 @@ DEFAULT_ROOM = "!default:srv"
 class FakeEngine:
     def __init__(self):
         self.calls = []
+        self._seq = 0
 
     def handle(self, event):
+        self._seq += 1
         rec = {
             "room": event.room,
             "action": event.action,
             "watched": bool((event.extra or {}).get("watched")),
         }
-        if event.kind == "note":                     # note-only field; issue recs stay 3-key
+        if event.kind == "note":                     # note-only fields; issue recs stay 3-key
             rec["comment"] = event.comment
+            rec["thread_root"] = (event.extra or {}).get("thread_root")
         self.calls.append(rec)
-        return {"sent": [event.room]}
+        return {"sent": [event.room], "event_id": f"$evt{self._seq}"}
+
+
+class FakeStore:
+    """In-memory get/set_state — backs note-thread roots in the webhook handler."""
+    def __init__(self):
+        self.d = {}
+
+    def get_state(self, kind, key):
+        return self.d.get((kind, key))
+
+    def set_state(self, kind, key, value):
+        self.d[(kind, key)] = value
 
 
 class FakeSources:
@@ -56,6 +71,7 @@ class FakeCtx:
         self.settings = settings
         self.engine = engine
         self.sources = sources
+        self.store = FakeStore()
 
 
 @pytest.fixture
@@ -154,13 +170,16 @@ def test_watch_room_equal_to_default_not_double_posted(settings, monkeypatch):
 
 # --- note (comment) routing: watch-rooms only, throttled ---------------
 def _note_payload(labels=("security",), note="готово @m.bahmutskij",
-                  action="create", system=False, noteable="Issue"):
+                  action="create", system=False, noteable="Issue", iid=7):
+    issue = {"title": "X", "labels": [{"title": t} for t in labels]}
+    if iid is not None:
+        issue["iid"] = iid
     return {
         "object_kind": "note",
         "object_attributes": {"noteable_type": noteable, "action": action,
                               "system": system, "note": note,
                               "url": "https://gl/7#note_1"},
-        "issue": {"iid": 7, "title": "X", "labels": [{"title": t} for t in labels]},
+        "issue": issue,
         "project": {"path_with_namespace": PROJECT},
         "user": {"username": "d.nikulin"},
     }
@@ -172,8 +191,10 @@ def test_note_on_watched_goes_only_to_watch_room(settings, monkeypatch):
     monkeypatch.setattr(app_module, "ctx", ctx)
     _call(ctx, _note_payload())
     # never the source room — only the watch room, marked watched, with the comment.
+    # First comment has no thread root yet (it becomes the root).
     assert ctx.engine.calls == [
-        {"room": "!sec:srv", "action": "create", "watched": True, "comment": "готово @m.bahmutskij"},
+        {"room": "!sec:srv", "action": "create", "watched": True,
+         "comment": "готово @m.bahmutskij", "thread_root": None},
     ]
 
 
@@ -204,3 +225,70 @@ def test_note_burst_is_throttled_before_the_breaker(settings, monkeypatch):
         res = _call(ctx, _note_payload())
     assert len(ctx.engine.calls) == 4                # only 4 delivered
     assert any(k.startswith("throttled:") for k in res["results"])
+
+
+# --- note threading: comments of one issue nest under the first ---------
+def test_note_first_comment_becomes_thread_root(settings, monkeypatch):
+    settings.set_watched([{"name": "Sec", "tags": ["security"], "rooms": ["!sec:srv"]}])
+    ctx = _ctx(settings)
+    monkeypatch.setattr(app_module, "ctx", ctx)
+    _call(ctx, _note_payload())
+    # posted WITHOUT a thread root, and its event id is stored as the root
+    assert ctx.engine.calls[0]["thread_root"] is None
+    assert ctx.store.get_state("note_thread", f"{PROJECT}#7@!sec:srv") == {"event_id": "$evt1"}
+
+
+def test_note_second_comment_threads_under_first(settings, monkeypatch):
+    settings.set_watched([{"name": "Sec", "tags": ["security"], "rooms": ["!sec:srv"]}])
+    ctx = _ctx(settings)
+    monkeypatch.setattr(app_module, "ctx", ctx)
+    _call(ctx, _note_payload())                                  # #1 -> root $evt1
+    _call(ctx, _note_payload(note="второй коммент"))            # #2 -> nests under $evt1
+    assert ctx.engine.calls[0]["thread_root"] is None
+    assert ctx.engine.calls[1]["thread_root"] == "$evt1"        # threaded under the first
+    # root is not overwritten by later comments
+    assert ctx.store.get_state("note_thread", f"{PROJECT}#7@!sec:srv") == {"event_id": "$evt1"}
+
+
+def test_note_threads_are_per_room(settings, monkeypatch):
+    # same issue watched into two rooms keeps an independent thread root per room
+    settings.set_watched([{"name": "Sec", "tags": ["security"], "rooms": ["!a:srv", "!b:srv"]}])
+    ctx = _ctx(settings)
+    monkeypatch.setattr(app_module, "ctx", ctx)
+    _call(ctx, _note_payload())
+    assert ctx.store.get_state("note_thread", f"{PROJECT}#7@!a:srv") == {"event_id": "$evt1"}
+    assert ctx.store.get_state("note_thread", f"{PROJECT}#7@!b:srv") == {"event_id": "$evt2"}
+
+
+def test_note_store_fault_never_breaks_delivery(settings, monkeypatch):
+    # A SQLite/JSON hiccup in the thread store must degrade to "no threading",
+    # NOT bubble up as a 500 that drops (or on resend, duplicates) the comment.
+    settings.set_watched([{"name": "Sec", "tags": ["security"], "rooms": ["!sec:srv"]}])
+    ctx = _ctx(settings)
+
+    class BoomStore:
+        def get_state(self, *a):
+            raise RuntimeError("db down")
+
+        def set_state(self, *a, **k):
+            raise RuntimeError("db down")
+
+    ctx.store = BoomStore()
+    monkeypatch.setattr(app_module, "ctx", ctx)
+    res = _call(ctx, _note_payload())                       # must NOT raise
+    assert "posted" in res
+    assert ctx.engine.calls == [                            # still delivered, just un-threaded
+        {"room": "!sec:srv", "action": "create", "watched": True,
+         "comment": "готово @m.bahmutskij", "thread_root": None},
+    ]
+
+
+def test_note_without_iid_posts_top_level(settings, monkeypatch):
+    # A malformed (iid-less) note must post a normal message, never share a
+    # per-project-room thread key with other iid-less notes.
+    settings.set_watched([{"name": "Sec", "tags": ["security"], "rooms": ["!sec:srv"]}])
+    ctx = _ctx(settings)
+    monkeypatch.setattr(app_module, "ctx", ctx)
+    _call(ctx, _note_payload(iid=None))
+    assert ctx.engine.calls[0]["thread_root"] is None
+    assert ctx.store.d == {}                                # no thread key persisted
