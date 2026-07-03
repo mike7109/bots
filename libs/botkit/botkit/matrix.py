@@ -80,6 +80,44 @@ class MatrixClient:
         resp.raise_for_status()
         return resp.json().get("event_id")
 
+    def edit_html(
+        self,
+        room_id: str,
+        target_event_id: str,
+        html: str,
+        *,
+        plain: str | None = None,
+        notice: bool = True,
+    ) -> str | None:
+        """Replace a previously sent message's content in place (m.replace).
+
+        Clients re-render the ORIGINAL event with the new content — nothing new
+        appears in the timeline. Editing a thread's ROOT event renames the
+        thread (Element titles a topic by its root's content). Only works on
+        the bot's own messages. The top-level body carries the spec's `* `
+        fallback prefix for clients that don't understand edits.
+        """
+        body = plain if plain is not None else _strip_html(html)
+        new_content: dict = {
+            "msgtype": "m.notice" if notice else "m.text",
+            "body": body,
+            "format": "org.matrix.custom.html",
+            "formatted_body": html,
+        }
+        content = {
+            **new_content,
+            "body": f"* {body}",
+            "formatted_body": f"* {html}",
+            "m.new_content": new_content,
+            "m.relates_to": {"rel_type": "m.replace", "event_id": target_event_id},
+        }
+        room = requests.utils.quote(room_id, safe="")
+        txn = uuid.uuid4().hex
+        url = f"{self.base}/_matrix/client/v3/rooms/{room}/send/m.room.message/{txn}"
+        resp = self._s.put(url, json=content, timeout=self.timeout)
+        resp.raise_for_status()
+        return resp.json().get("event_id")
+
     # --- direct messages -------------------------------------------------
     @property
     def user_id(self) -> str:

@@ -86,7 +86,6 @@ def test_normalize_update_parses_assignee_and_due_changes():
         "assignees": {"previous": [{"username": "bob"}], "current": [{"username": "carol"}]},
         "due_date": {"previous": "2026-06-01", "current": "2026-07-01"},
         "labels": {"previous": [], "current": [{"title": "security"}]},   # dropped
-        "title": {"previous": "a", "current": "b"},                        # dropped
     }
     ev = normalize(_payload("update", changes=changes))
     assert ev.changes == {
@@ -95,14 +94,23 @@ def test_normalize_update_parses_assignee_and_due_changes():
     }
 
 
+def test_normalize_update_parses_rename():
+    # a rename rides `changes.title`; app.py uses it to EDIT the thread root
+    # (no thread message) — so it must survive distillation.
+    changes = {"title": {"previous": "старое имя", "current": "новое имя"}}
+    ev = normalize(_payload("update", changes=changes))
+    assert ev.changes == {"title": {"previous": "старое имя", "current": "новое имя"}}
+
+
 def test_normalize_update_drops_unchanged_and_noise():
     changes = {
         "assignees": {"previous": [{"username": "bob"}], "current": [{"username": "bob"}]},  # no change
         "labels": {"previous": [], "current": [{"title": "x"}]},
         "updated_at": {"previous": "t1", "current": "t2"},
+        "title": {"previous": "same", "current": "same"},                 # no change
     }
     ev = normalize(_payload("update", changes=changes))
-    assert ev.changes == {}                                # nothing assignee/due actually changed
+    assert ev.changes == {}                                # nothing actually changed
 
 
 def test_normalize_update_unassign_to_empty():

@@ -49,11 +49,12 @@ def normalize(payload: dict) -> Event | None:
 
 
 def _changes(raw: dict) -> dict:
-    """Distil a GitLab issue `update` diff down to the two fields we thread into
-    a watched issue's topic: who it's assigned to and its due date. Everything
-    else (labels, title/rename, description edits, position, …) is intentionally
-    dropped — those must NOT post a thread message. Each entry is included ONLY
-    when it actually changed, as {previous: [...]/date, current: [...]/date}."""
+    """Distil a GitLab issue `update` diff down to the fields the watched-issue
+    topic reacts to: assignees and due date (each posts a thread message) plus
+    title (posts NOTHING — app.py edits the thread's root anchor in place so the
+    topic is renamed along with the issue). Everything else (labels, description
+    edits, position, …) is intentionally dropped. Each entry is included ONLY
+    when it actually changed, as {previous: ..., current: ...}."""
     out: dict = {}
     a = raw.get("assignees")
     if isinstance(a, dict):
@@ -66,6 +67,11 @@ def _changes(raw: dict) -> dict:
         prev, cur = d.get("previous"), d.get("current")
         if prev != cur:
             out["due_date"] = {"previous": prev, "current": cur}
+    t = raw.get("title")
+    if isinstance(t, dict):
+        prev, cur = t.get("previous"), t.get("current")
+        if cur and prev != cur:                 # a rename always has a non-empty new title
+            out["title"] = {"previous": prev, "current": cur}
     return out
 
 

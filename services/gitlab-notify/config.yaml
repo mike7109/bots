@@ -32,7 +32,8 @@ rules:
     # reopen into its thread under the root card (app.py). `open` is NOT nested —
     # the watched thread's ROOT card (issue_root) IS the open notice. `update`
     # never renders via this template: app.py turns a watched-issue update into an
-    # `issue_change` (assignee/due only) or drops it (labels/rename).
+    # `issue_change` (assignee/due only), edits the issue_root anchor in place on
+    # a rename (the topic follows the issue's title), or drops it (labels).
     actions: [open, close, reopen]
     template: issue
     to: [room]

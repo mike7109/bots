@@ -72,12 +72,29 @@ class FakeSources:
         return {"room": self._room} if self._room else None
 
 
+class FakeMatrix:
+    """Records edit_html calls — the thread-root rename path (m.replace)."""
+    def __init__(self):
+        self.edits = []
+
+    def edit_html(self, room_id, target_event_id, html, **kw):
+        self.edits.append({"room": room_id, "target": target_event_id, "html": html})
+        return f"$edit{len(self.edits)}"
+
+
 class FakeCtx:
     def __init__(self, settings, engine, sources):
         self.settings = settings
         self.engine = engine
         self.sources = sources
         self.store = FakeStore()
+        self.matrix = FakeMatrix()
+        self.guard = None
+        # the REAL renderer over the real templates dir, so a rename test edits
+        # the root with the genuine issue_root anchor markup
+        import pathlib
+        from botkit.notify.render import Renderer
+        self.renderer = Renderer(pathlib.Path(app_module.__file__).parent / "templates")
 
 
 @pytest.fixture
@@ -181,6 +198,30 @@ def test_update_label_only_makes_root_but_posts_nothing_else(settings, monkeypat
     ]
 
 
+def test_watched_label_added_to_old_issue_creates_thread_at_once(settings, monkeypatch):
+    # The exact production scenario: an OLD issue (no thread state anywhere) gets a
+    # watched label assigned. GitLab fires `update` with a labels diff in `changes`
+    # (which normalize drops — labels are not a threadable change). The topic
+    # (anchor + card) must appear in the watch room IMMEDIATELY on that webhook,
+    # and a repeat update must not create a second root.
+    settings.set_watched([{"name": "Sec", "tags": ["security"], "rooms": ["!sec:srv"]}])
+    ctx = _ctx(settings)
+    monkeypatch.setattr(app_module, "ctx", ctx)
+    changes = {"labels": {"previous": [], "current": [{"title": "security"}]},
+               "updated_at": {"previous": "2025-01-10 10:00:00 UTC",
+                              "current": "2026-07-03 10:00:00 UTC"}}
+    _call(ctx, _payload("update", labels=("bug", "security"), changes=changes))
+    assert ctx.engine.calls == [
+        {"kind": "issue_root", "room": "!sec:srv", "action": "update", "watched": True},
+        {"kind": "issue_card", "room": "!sec:srv", "action": "update", "watched": True,
+         "thread_root": "$evt1"},
+    ]
+    assert ctx.store.get_state("issue_thread", f"{PROJECT}#7@!sec:srv") == {"event_id": "$evt1"}
+    _call(ctx, _payload("update", labels=("bug", "security"), changes=changes))
+    roots = [c for c in ctx.engine.calls if c["kind"] == "issue_root"]
+    assert len(roots) == 1                       # root is created once per (issue, room)
+
+
 def test_update_assignee_change_posts_issue_change(settings, monkeypatch):
     settings.set_watched([{"name": "Sec", "tags": ["security"], "rooms": ["!sec:srv"]}])
     ctx = _ctx(settings)
@@ -204,6 +245,53 @@ def test_update_due_change_posts_issue_change(settings, monkeypatch):
     _call(ctx, _payload("update", labels=("security",), changes=changes))
     kinds = [c["kind"] for c in ctx.engine.calls]
     assert kinds == ["issue_root", "issue_card", "issue_change"]
+
+
+def test_rename_edits_the_thread_root_in_place(settings, monkeypatch):
+    # Renaming a watched issue must rename its topic: the existing issue_root
+    # anchor is EDITED (m.replace) with the new title — no new thread message.
+    settings.set_watched([{"name": "Sec", "tags": ["security"], "rooms": ["!sec:srv"]}])
+    ctx = _ctx(settings)
+    monkeypatch.setattr(app_module, "ctx", ctx)
+    _call(ctx, _payload("open", labels=("security",)))            # topic: root $evt2 + card
+    changes = {"title": {"previous": "X", "current": "Новое имя"}}
+    p = _payload("update", labels=("security",), changes=changes)
+    p["object_attributes"]["title"] = "Новое имя"                 # attr carries the NEW title
+    res = _call(ctx, p)
+    assert [c["kind"] for c in ctx.engine.calls] == ["issue", "issue_root", "issue_card"]  # nothing new posted
+    assert ctx.matrix.edits == [{
+        "room": "!sec:srv", "target": "$evt2",
+        "html": ctx.renderer.render("issue_root", "matrix",
+                                    {"url": "https://gl/7", "iid": "7", "title": "Новое имя"}),
+    }]
+    assert res["results"]["watch:!sec:srv"] == {"renamed": True}
+
+
+def test_rename_of_unseen_issue_creates_root_with_new_title_no_edit(settings, monkeypatch):
+    # First sight of a watched issue via a rename: the lazily created root already
+    # carries the new title, so no edit must follow.
+    settings.set_watched([{"name": "Sec", "tags": ["security"], "rooms": ["!sec:srv"]}])
+    ctx = _ctx(settings)
+    monkeypatch.setattr(app_module, "ctx", ctx)
+    changes = {"title": {"previous": "X", "current": "Новое имя"}}
+    _call(ctx, _payload("update", labels=("security",), changes=changes))
+    assert [c["kind"] for c in ctx.engine.calls] == ["issue_root", "issue_card"]
+    assert ctx.matrix.edits == []
+
+
+def test_rename_with_due_change_edits_root_and_posts_change(settings, monkeypatch):
+    # One GitLab save can rename AND move the deadline: the root is edited in
+    # place and the due change still posts into the thread.
+    settings.set_watched([{"name": "Sec", "tags": ["security"], "rooms": ["!sec:srv"]}])
+    ctx = _ctx(settings)
+    monkeypatch.setattr(app_module, "ctx", ctx)
+    _call(ctx, _payload("open", labels=("security",)))            # topic: root $evt2 + card
+    changes = {"title": {"previous": "X", "current": "Y"},
+               "due_date": {"previous": None, "current": "2026-07-10"}}
+    _call(ctx, _payload("update", labels=("security",), changes=changes))
+    kinds = [c["kind"] for c in ctx.engine.calls]
+    assert kinds == ["issue", "issue_root", "issue_card", "issue_change"]
+    assert len(ctx.matrix.edits) == 1 and ctx.matrix.edits[0]["target"] == "$evt2"
 
 
 def test_update_without_watched_is_ignored(settings, monkeypatch):

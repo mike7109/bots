@@ -142,6 +142,31 @@ def _ensure_thread_root(event, rm: str, tkey: str | None):
     return eid, True
 
 
+def _maybe_rename_thread_root(event, rm: str, root_eid: str | None, created: bool) -> bool:
+    """A GitLab rename renames the Matrix topic too. Element titles a thread by
+    the CONTENT of its root event, so re-render the issue_root anchor with the
+    new title and EDIT the root in place (m.replace) — no new message appears,
+    the topic just changes its name. Skipped when the root was created just now
+    (it already carries the new title). Mirrors engine.handle's kill-switch/
+    breaker gates (an edit is still a send); bypasses the note throttle like the
+    root itself (structural, bounded to one edit per human rename). Best-effort:
+    a rename failure never breaks delivery."""
+    if created or not root_eid or not event.changes.get("title"):
+        return False
+    if not ctx.settings.enabled():
+        return False
+    if ctx.guard is not None and ctx.guard.blocked():
+        return False
+    try:
+        html = ctx.renderer.render("issue_root", "matrix", dataclasses.asdict(event))
+        ctx.matrix.edit_html(rm, root_eid, html, notice=True)
+        log.info("renamed issue thread %s#%s in %s", event.project, event.iid, rm)
+        return True
+    except Exception:                               # noqa: BLE001 — rename is best-effort
+        log.exception("issue-thread rename failed")
+        return False
+
+
 def _thread_body_kind(event) -> str | None:
     """What (if anything) a watched issue's thread posts for THIS event:
       note          -> the comment                     (kind "note")
@@ -149,7 +174,8 @@ def _thread_body_kind(event) -> str | None:
       update        -> ONLY a real assignee/due change  (kind "issue_change")
       open / label-only or rename update -> None (the root card is the sole notice;
                        other edits stay silent — the root may still have just been
-                       lazily created by the caller).
+                       lazily created by the caller, and a rename edits the root's
+                       content in place via _maybe_rename_thread_root).
 
     As agreed: `open` posts ONLY the root card (nothing nested); a watched-label
     add just creates the root; the branch carries only what's significant —
@@ -219,12 +245,22 @@ async def webhook(request: Request, x_gitlab_token: str = Header(default="")):
         # iid is required so a malformed payload can't merge distinct issues.
         tkey = f"{event.project}#{event.iid}@{rm}" if event.iid else None
         root_eid, root_created = _ensure_thread_root(event, rm, tkey)
+        # A rename (changes.title) edits the existing root anchor in place so the
+        # topic follows the issue's name — even when the same update also carries
+        # an assignee/due change that will post a thread message below.
+        renamed = _maybe_rename_thread_root(event, rm, root_eid, root_created)
 
         body_kind = _thread_body_kind(event)
         if body_kind is None:
             # `open` (root card is the notice) or a label/rename-only update: the
-            # root may have just been lazily created, but there's nothing to nest.
-            results[f"watch:{rm}"] = {"posted": "root"} if root_created else {"ignored": "nothing to thread"}
+            # root may have just been lazily created or renamed, but there's
+            # nothing to nest.
+            if root_created:
+                results[f"watch:{rm}"] = {"posted": "root"}
+            elif renamed:
+                results[f"watch:{rm}"] = {"renamed": True}
+            else:
+                results[f"watch:{rm}"] = {"ignored": "nothing to thread"}
             continue
 
         # SAFETY: comments + change notices arrive one webhook each; a chatty

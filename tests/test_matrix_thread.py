@@ -52,3 +52,18 @@ def test_mentions_land_in_m_mentions():
     c = _client()
     c.send_html("!r", "hi", mention_user_ids=["@a:s"], notice=False)
     assert c._s.last["m.mentions"] == {"user_ids": ["@a:s"]}
+
+
+def test_edit_html_builds_m_replace():
+    # edit_html replaces a sent message's content in place: m.new_content carries
+    # the real content, the top level the spec's `* ` fallback, and m.relates_to
+    # points at the ORIGINAL event (this is how a thread root gets renamed).
+    c = _client()
+    eid = c.edit_html("!r", "$root", "<b>новое название</b>")
+    last = c._s.last
+    assert last["m.relates_to"] == {"rel_type": "m.replace", "event_id": "$root"}
+    assert last["m.new_content"]["formatted_body"] == "<b>новое название</b>"
+    assert last["m.new_content"]["msgtype"] == "m.notice"
+    assert last["body"].startswith("* ")                  # fallback for non-edit clients
+    assert last["formatted_body"].startswith("* ")
+    assert eid == "$e"
