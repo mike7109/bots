@@ -1,0 +1,5 @@
+{# One line INTO a watched issue's thread when a child Task (внутренняя карточка)
+   changes status. Produced by subtasks.py (GraphQL poll — GitLab 17.6 sends no
+   webhooks for Task work items). Task comments/assignees/renames are silent by
+   design; iid/title/url here are the TASK's, the thread is the parent's. #}
+{% if action == 'open' %}🧩 <b>Создана подзадача</b>{% elif action == 'reopen' %}🔁 <b>Переоткрыта подзадача</b>{% else %}✅ <b>Закрыта подзадача</b>{% endif %}: <a href="{{ url | safe_url }}">#{{ iid }}</a> {{ title | truncate(120, true, '…', 0) }}

@@ -64,6 +64,12 @@ rules:
     mention: assignee              # ping the (new) assignee — their ownership/deadline moved
     notice: false                  # always notify the thread about the change
 
+  - event: subtask                 # poll: child Task of a watched issue changed status
+    actions: [open, close, reopen] # created / closed / reopened — nothing else (subtasks.py)
+    template: subtask              # 🧩 создана / ✅ закрыта / 🔁 переоткрыта → в тред родителя
+    to: [room]                     # the issue's watch rooms (event.room set by subtasks.py)
+    notice: false                  # m.text — the room is notified about the milestone
+
   - event: due_soon                # cron: due tomorrow -> shared room
     template: due_soon
     to: [room]

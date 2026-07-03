@@ -22,6 +22,7 @@ from botkit.config import env
 from botkit.gitlab import GitLabClient
 from botkit.notify.render import _safe_url
 from botkit.webhook import verify_token
+import subtasks
 from admin import create_admin_router
 from normalize import normalize
 from scheduler import run_scheduler
@@ -237,6 +238,11 @@ async def webhook(request: Request, x_gitlab_token: str = Header(default="")):
     if post_default:
         results["default"] = ctx.engine.handle(
             dataclasses.replace(event, room=default_room, extra={}))
+
+    # A reopened watched issue re-enters the subtask poll scope (poll() skips
+    # issues whose snapshot marked the parent closed).
+    if event.action == "reopen" and event.iid and watch_rooms:
+        subtasks.parent_reopened(ctx.store, f"{event.project}#{event.iid}")
 
     for rm in watch_rooms:
         # A watched issue is ONE thread whose ROOT is the full card (issue_root).

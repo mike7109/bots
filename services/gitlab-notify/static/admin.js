@@ -6,7 +6,7 @@ const TABS=[["dash","Дашборд"],["src","Группы"],["users","Полу�
 const PASS_ICON={
   due:'📅', overdue:'⏰',
   digest_full:'📋', digest_delta:'📋', team_full:'🗓', team_delta:'🗓',
-  triage:'🧹', stale:'🕸', metrics:'📊', note:'💬',
+  triage:'🧹', stale:'🕸', metrics:'📊', note:'💬', subtask:'🧩',
 };
 const CAT_ICON={group:'🗓', personal:'📋'};
 function passIcon(p,meta){return PASS_ICON[p]||CAT_ICON[(meta&&meta.category)]||'•';}
@@ -325,12 +325,13 @@ function miniDays(sel,prefix){return DAYS.map((d,i)=>`<span class="day ${sel.inc
 // pass has no registry entry.
 function passCat(p){return (REG[p]||{}).trigger==='webhook'?'webhook':((REG[p]||{}).category||'group');}
 // The unified «Рассылки» list is ONE registry-driven list: the scheduled passes
-// (S.passes) PLUS every webhook-triggered registry entry (e.g. `issue`). Both are
-// just registry passes; the card adapts (webhook cards have no schedule/run).
+// (S.passes) PLUS every event-driven registry entry — webhook (e.g. `issue`) or
+// poll (`subtask`). The card adapts (event-driven cards have no schedule/run).
 function isWebhook(p){return (REG[p]||{}).trigger==='webhook';}
+function isEventDriven(p){const t=(REG[p]||{}).trigger;return t==='webhook'||t==='poll';}
 function allCards(){
-  const webhook=(S.registry||[]).filter(p=>p.trigger==='webhook').map(p=>p.name);
-  return S.passes.concat(webhook.filter(p=>!S.passes.includes(p)));
+  const evd=(S.registry||[]).filter(p=>p.trigger==='webhook'||p.trigger==='poll').map(p=>p.name);
+  return S.passes.concat(evd.filter(p=>!S.passes.includes(p)));
 }
 // Sub-tabs are built from the categories actually present across the unified list:
 // «Все» first, then CAT_ORDER, then any extra categories appended in first-seen
@@ -371,6 +372,7 @@ function dayRange(days){
   return s.map(i=>DAYS[i]).join(', ');
 }
 function passSummary(p,c,wh){
+  if((REG[p]||{}).trigger==='poll')return 'фоновый опрос GitLab (раз в ~3 мин) — подзадачи особых issue';
   if(wh)return p==='note'?'новый комментарий к особой issue':'по событию issue (open/close/reopen)';
   if(c.kind==='interval'){
     const ev=c.every_hours==null?2:c.every_hours, th=c.change_threshold==null?5:c.change_threshold;
@@ -390,13 +392,18 @@ function renderPasses(){
     const title=meta.title||p, desc=meta.description||'', tpl=meta.event_kind||p;
     const ek=meta.event_kind||p;
     const icon=passIcon(p,meta);
-    const wh=isWebhook(p);
+    // Event-driven (webhook OR poll) cards share one shape: no schedule editor,
+    // no «Запустить сейчас», the head toggle drives the RULE.
+    const wh=isEventDriven(p), pol=(REG[p]||{}).trigger==='poll';
     // Destination badge (self-describing card): dm → «Личка», else «Комната».
     const dm=(meta.to||[]).includes('dm');
     const destBadge=`<span class="tag" title="Куда уходит рассылка">${dm?'→ Личка':'→ Комната'}</span>`;
     // Trigger badge: webhook («🔔 вебхук») fires in real time on a GitLab event;
-    // scheduled («⏱ расписание») fires by days/time or interval below.
-    const trigBadge=wh
+    // poll («🕓 опрос») is the background GraphQL poll; scheduled («⏱ расписание»)
+    // fires by days/time or interval below.
+    const trigBadge=pol
+      ? `<span class="tag" title="Фоновый опрос GitLab (GraphQL) раз в несколько минут">🕓 опрос</span>`
+      : wh
       ? `<span class="tag" title="Срабатывает в реальном времени по событию GitLab">🔔 вебхук</span>`
       : `<span class="tag" title="Идёт по расписанию (дни/время или интервал)">⏱ расписание</span>`;
     // ЕДИНЫЙ выключатель уведомления в шапке. active = «реально ли уходит»:

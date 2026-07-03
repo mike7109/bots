@@ -22,6 +22,7 @@ from botkit.gitlab import GitLabClient
 import cron
 import keys
 import passes
+import subtasks
 
 log = logging.getLogger("gitlab-notify.scheduler")
 TICK_SECONDS = 30
@@ -275,6 +276,13 @@ async def run_scheduler(ctx, stop: asyncio.Event) -> None:
             await asyncio.to_thread(tick, ctx)
         except Exception:                          # noqa: BLE001
             log.exception("scheduler tick failed")
+        try:
+            # Watched-issue subtask poll (GitLab sends no Task webhooks). Runs on
+            # its own cadence OUTSIDE tick's calendar gates (active hours/weekends)
+            # — it substitutes for webhooks, which stay realtime, not for digests.
+            await asyncio.to_thread(subtasks.maybe_poll, ctx)
+        except Exception:                          # noqa: BLE001
+            log.exception("subtask poll failed")
         try:
             await asyncio.wait_for(stop.wait(), timeout=TICK_SECONDS)
         except asyncio.TimeoutError:

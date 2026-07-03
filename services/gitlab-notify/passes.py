@@ -42,7 +42,8 @@ class Pass:
       description      human description (UI; copied from the old admin.js PASS_INFO).
       category         "group" (room passes) or "personal" (dm passes) — declared
                        metadata for a later UI phase; not used for dispatch yet.
-      trigger          "schedule" (the 7 scheduled passes) or "webhook" (issue).
+      trigger          "schedule" (the 7 scheduled passes), "webhook" (issue/note)
+                       or "poll" (subtask — the scheduler-loop GraphQL poll).
       template         the Jinja template name (templates/<template>.matrix.*.j2).
       event_kind       the Matrix Event.kind this pass emits (STABLE — matches the
                        config.yaml rule `event:` and keys.py constants).
@@ -258,6 +259,15 @@ _PASSES = [
                     "пинг — только упомянутым @логином.",
         category="group", trigger="webhook", template="note", event_kind="note",
         to=("room",), mention="mentioned", mode="single", daily=False,
+        schedule_defaults={}, run=None,
+    ),
+    Pass(
+        name="subtask", title="Подзадачи особых issue",
+        description="Создание/закрытие/переоткрытие вложенной карточки (Task) у особой issue "
+                    "→ строкой в её тред. GitLab не шлёт вебхуки по Task, поэтому бот "
+                    "опрашивает GraphQL раз в несколько минут (только issue с тредами).",
+        category="group", trigger="poll", template="subtask", event_kind="subtask",
+        to=("room",), mention=None, mode="single", daily=False,
         schedule_defaults={}, run=None,
     ),
 ]
