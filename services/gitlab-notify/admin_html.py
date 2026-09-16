@@ -2,6 +2,11 @@
 # constant (served as-is, no per-request file read); CSS and JS live in
 # static/admin.css + static/admin.js, mounted at /admin/static (see app.py).
 # Talks to /admin/api/* with the session cookie. Tabbed layout.
+import hashlib
+import pathlib
+
+_STATIC_DIR = pathlib.Path(__file__).parent / "static"
+
 HTML = r"""<!doctype html>
 <html lang="ru"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -272,3 +277,22 @@ HTML = r"""<!doctype html>
 <script src="/admin/static/admin.js"></script>
 </body></html>
 """
+
+
+# --- cache-busting for the static assets ---------------------------------
+# /admin/static is served by StaticFiles, which sends only ETag/Last-Modified —
+# no Cache-Control. Browsers then apply HEURISTIC freshness (a fraction of the
+# file's age), so a months-old admin.js can be served from cache for weeks
+# WITHOUT revalidating: the page markup updates, the script behind it doesn't,
+# and half the UI silently does nothing. Stamping the content hash into the URL
+# makes the browser refetch exactly when the file actually changed.
+def _asset_version(name: str) -> str:
+    try:
+        return hashlib.md5((_STATIC_DIR / name).read_bytes()).hexdigest()[:8]
+    except OSError:                                  # missing file — don't break the page
+        return "dev"
+
+
+for _asset in ("admin.css", "admin.js"):
+    HTML = HTML.replace(f"/admin/static/{_asset}",
+                        f"/admin/static/{_asset}?v={_asset_version(_asset)}")
