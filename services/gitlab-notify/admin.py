@@ -279,6 +279,12 @@ def create_admin_router(ctx) -> list[APIRouter]:
                  "token_masked": _mask(s.get("token")), "has_token": bool(s.get("token"))}
                 for s in ctx.sources.all()
             ],
+            # Per-group schedule layer: what each group pinned for itself
+            # ({} = follows the global rows) and its scheduled-sends master switch.
+            "source_passes": {s["id"]: settings.source_pass_overrides(s["id"])
+                              for s in ctx.sources.all()},
+            "source_scheduler": {s["id"]: settings.source_scheduler_on(s["id"])
+                                 for s in ctx.sources.all()},
         }
 
     @router.post("/api/global")
@@ -370,11 +376,9 @@ def create_admin_router(ctx) -> list[APIRouter]:
         body = await request.json()
         return settings.update_guard(body if isinstance(body, dict) else {})
 
-    @router.post("/api/pass/{name}")
-    async def set_pass(name: str, request: Request):
-        if name not in cron.PASSES:
-            raise HTTPException(status_code=400, detail="unknown pass")
-        body = await request.json()
+    def _clean_pass_patch(body: dict) -> dict:
+        """Whitelist + coerce a schedule patch. Shared by the global editor and
+        the per-group one so a group can't store a shape the scheduler won't read."""
         clean = {}
         if "enabled" in body:
             clean["enabled"] = bool(body["enabled"])
@@ -405,7 +409,37 @@ def create_admin_router(ctx) -> list[APIRouter]:
                 clean["change_threshold"] = max(0, int(body["change_threshold"]))
             except (ValueError, TypeError):
                 pass
-        return settings.update_pass(name, clean)
+        return clean
+
+    @router.post("/api/pass/{name}")
+    async def set_pass(name: str, request: Request):
+        if name not in cron.PASSES:
+            raise HTTPException(status_code=400, detail="unknown pass")
+        return settings.update_pass(name, _clean_pass_patch(await request.json()))
+
+    # --- per-group schedule overrides ---------------------------------------
+    @router.post("/api/source/{sid}/pass/{name}")
+    async def set_source_pass(sid: str, name: str, request: Request):
+        """One group's own schedule for one pass. Body = the same fields as
+        /api/pass/<name>, or {"reset": true} to drop the override and follow the
+        global schedule again."""
+        if name not in cron.PASSES:
+            raise HTTPException(status_code=400, detail="unknown pass")
+        if not ctx.sources.get(sid):
+            raise HTTPException(status_code=404, detail="unknown source")
+        body = await request.json()
+        if body.get("reset"):
+            return {"override": {}, "effective": settings.clear_source_pass(sid, name)}
+        eff = settings.update_source_pass(sid, name, _clean_pass_patch(body))
+        return {"override": settings.source_pass(sid, name), "effective": eff}
+
+    @router.post("/api/source/{sid}/scheduler")
+    async def set_source_scheduler(sid: str, request: Request):
+        """Master switch for a group: off = webhooks only, no scheduled sends."""
+        if not ctx.sources.get(sid):
+            raise HTTPException(status_code=404, detail="unknown source")
+        body = await request.json()
+        return {"enabled": settings.set_source_scheduler(sid, bool(body.get("enabled", True)))}
 
     @router.post("/api/user/{login}")
     async def set_user(login: str, request: Request):
@@ -436,10 +470,15 @@ def create_admin_router(ctx) -> list[APIRouter]:
         mode = body.get("mode")
         dry = bool(body.get("dry"))
         full = True if mode == "full" else False if mode == "delta" else None
+        # Optional `source`: run for that ONE group (the per-group view's «Запустить
+        # сейчас»); omitted -> every enabled group, as before.
+        only = (body.get("source") or "").strip() or None
         url = settings.conn_value("gitlab_url")
         per, recipients = [], set()
         for src in ctx.sources.enabled():
             if not src.get("group_id"):
+                continue
+            if only and src["id"] != only:
                 continue
             try:
                 gl = GitLabClient(url, src.get("token", ""))
@@ -583,6 +622,7 @@ def create_admin_router(ctx) -> list[APIRouter]:
     @router.delete("/api/sources/{sid}")
     def delete_source(sid: str):
         ctx.sources.delete(sid)
+        settings.clear_source_settings(sid)   # no ghost overrides if the id returns
         return {"ok": True}
 
     # --- connection settings (Matrix / webhook / GitLab) ---------------------

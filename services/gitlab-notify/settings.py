@@ -245,8 +245,14 @@ class Settings:
         return self.get_conn()
 
     # --- per-pass schedule (days + time the scheduler fires each pass) ----
-    def pass_schedule(self, name: str) -> dict:
+    def pass_schedule(self, name: str, source_id: str | None = None) -> dict:
         """Effective schedule for a pass: registry defaults + admin overrides.
+
+        Three layers, each merged over the previous: registry defaults, the
+        GLOBAL admin override (`pass:<name>`), and — when `source_id` is given —
+        that group's own override (`src:<sid>:pass:<name>`). A group only stores
+        the fields it actually changed, so editing the global schedule still
+        moves every group that hasn't pinned its own.
 
         The scheduler branches on `kind`: "interval" (the delta digests — fired
         every ~`every_hours` within the active window, or early on a burst of
@@ -259,17 +265,65 @@ class Settings:
         """
         base = dict(PASS_DEFAULTS.get(name, {"enabled": True, "days": WORKDAYS, "time": "09:00"}))
         base.update(self.store.get_state(_KIND, f"pass:{name}") or {})
+        if source_id:
+            base.update(self.source_pass(source_id, name))
         base.setdefault("kind", "daily")              # tolerate old/missing kind
         return base
 
-    def all_pass_schedules(self) -> dict:
-        return {name: self.pass_schedule(name) for name in PASS_DEFAULTS}
+    def all_pass_schedules(self, source_id: str | None = None) -> dict:
+        return {name: self.pass_schedule(name, source_id) for name in PASS_DEFAULTS}
 
     def update_pass(self, name: str, patch: dict) -> dict:
         cur = self.store.get_state(_KIND, f"pass:{name}") or {}
         cur.update(patch)
         self.store.set_state(_KIND, f"pass:{name}", cur)
         return self.pass_schedule(name)
+
+    # --- per-GROUP schedule overrides (a source may differ from the global) --
+    # Rationale: one Matrix room may want the full digest programme while another
+    # only wants realtime issue webhooks. The global rows stay the baseline; a
+    # group stores just its deltas under `src:<sid>:pass:<name>`, plus a master
+    # switch `src:<sid>:sched` that silences EVERY scheduled pass for that group
+    # (webhooks are unaffected — they don't go through the scheduler).
+    @staticmethod
+    def _src_pass_key(source_id: str, name: str) -> str:
+        return f"src:{source_id}:pass:{name}"
+
+    def source_pass(self, source_id: str, name: str) -> dict:
+        """This group's own override for a pass ({} when it follows the global)."""
+        return self.store.get_state(_KIND, self._src_pass_key(source_id, name)) or {}
+
+    def source_pass_overrides(self, source_id: str) -> dict:
+        """{pass name: override} for every pass this group has pinned."""
+        return {name: ov for name in PASS_DEFAULTS
+                if (ov := self.source_pass(source_id, name))}
+
+    def update_source_pass(self, source_id: str, name: str, patch: dict) -> dict:
+        cur = self.source_pass(source_id, name)
+        cur.update(patch)
+        self.store.set_state(_KIND, self._src_pass_key(source_id, name), cur)
+        return self.pass_schedule(name, source_id)
+
+    def clear_source_pass(self, source_id: str, name: str) -> dict:
+        """Drop the group's override — the pass follows the global schedule again."""
+        self.store.clear_state(_KIND, self._src_pass_key(source_id, name))
+        return self.pass_schedule(name, source_id)
+
+    def source_scheduler_on(self, source_id: str) -> bool:
+        """Master switch: False = this group gets webhooks only, no scheduled sends."""
+        row = self.store.get_state(_KIND, f"src:{source_id}:sched") or {}
+        return bool(row.get("enabled", True))
+
+    def set_source_scheduler(self, source_id: str, on: bool) -> bool:
+        self.store.set_state(_KIND, f"src:{source_id}:sched", {"enabled": bool(on)})
+        return self.source_scheduler_on(source_id)
+
+    def clear_source_settings(self, source_id: str) -> None:
+        """Forget every per-group schedule row (called when a source is deleted,
+        so a re-added group with the same id doesn't inherit ghost overrides)."""
+        for name in PASS_DEFAULTS:
+            self.store.clear_state(_KIND, self._src_pass_key(source_id, name))
+        self.store.clear_state(_KIND, f"src:{source_id}:sched")
 
     # --- operator alerts (who gets DM'd when the bot itself fails) --------
     def get_alerts(self) -> dict:

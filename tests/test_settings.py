@@ -504,3 +504,53 @@ def test_note_send_allowed_rooms_independent(settings):
 def test_note_send_allowed_inert_when_guard_off(settings):
     settings.update_guard({"enabled": False})
     assert all(settings.note_send_allowed("!x:s") for _ in range(20))   # nothing to protect
+
+
+# --- per-group schedule overrides -------------------------------------
+# A source (GitLab group -> Matrix room) may pin its own schedule for a pass, or
+# switch scheduled sends off entirely. The global rows stay the baseline that
+# every group without an override keeps following.
+def test_source_pass_inherits_global(settings):
+    settings.update_pass("digest_full", {"time": "10:00"})
+    assert settings.pass_schedule("digest_full", "g56")["time"] == "10:00"
+    assert settings.source_pass("g56", "digest_full") == {}      # nothing pinned
+
+
+def test_source_pass_override_is_scoped_to_that_group(settings):
+    settings.update_pass("digest_full", {"time": "10:00", "enabled": True})
+    settings.update_source_pass("g56", "digest_full", {"enabled": False})
+    assert settings.pass_schedule("digest_full", "g56")["enabled"] is False
+    assert settings.pass_schedule("digest_full", "default")["enabled"] is True   # other group
+    assert settings.pass_schedule("digest_full")["enabled"] is True              # global row
+    # Fields the group did NOT pin still come from the global row.
+    assert settings.pass_schedule("digest_full", "g56")["time"] == "10:00"
+
+
+def test_source_pass_overrides_lists_only_pinned(settings):
+    settings.update_source_pass("g56", "stale", {"enabled": False})
+    assert list(settings.source_pass_overrides("g56")) == ["stale"]
+    assert settings.source_pass_overrides("default") == {}
+
+
+def test_clear_source_pass_restores_inheritance(settings):
+    settings.update_pass("stale", {"time": "10:00"})
+    settings.update_source_pass("g56", "stale", {"time": "18:00"})
+    assert settings.pass_schedule("stale", "g56")["time"] == "18:00"
+    settings.clear_source_pass("g56", "stale")
+    assert settings.pass_schedule("stale", "g56")["time"] == "10:00"
+    assert settings.source_pass_overrides("g56") == {}
+
+
+def test_source_scheduler_master_switch(settings):
+    assert settings.source_scheduler_on("g56") is True           # default: follows the programme
+    settings.set_source_scheduler("g56", False)
+    assert settings.source_scheduler_on("g56") is False
+    assert settings.source_scheduler_on("default") is True       # scoped
+
+
+def test_clear_source_settings_forgets_the_group(settings):
+    settings.update_source_pass("g56", "stale", {"enabled": False})
+    settings.set_source_scheduler("g56", False)
+    settings.clear_source_settings("g56")
+    assert settings.source_pass_overrides("g56") == {}
+    assert settings.source_scheduler_on("g56") is True

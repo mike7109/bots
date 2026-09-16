@@ -159,7 +159,9 @@ def _run_triage(engine, gl, group_id, issues, store, *, full, dry, commit, room,
 
 
 def _run_stale(engine, gl, group_id, issues, store, *, full, dry, commit, room, skey):
-    days = int(engine.settings.pass_schedule("stale").get("days_idle", digests.STALE_DAYS))
+    # skey = the source id, so a group that pinned its own «без активности N дней»
+    # is honoured here too (falls back to the global row when it pinned nothing).
+    days = int(engine.settings.pass_schedule("stale", skey).get("days_idle", digests.STALE_DAYS))
     return digests.stale(engine, gl, group_id, store, days=days,
                          **_wk_kwargs(full=full, dry=dry, commit=commit, room=room, skey=skey))
 

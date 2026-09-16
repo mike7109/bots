@@ -82,6 +82,12 @@ HTML = r"""<!doctype html>
       <span class="mut" style="font-size:12px">— бот сам шлёт по расписанию. Выключи → пойдут только вебхуки (issue в комнату), дайджесты молчат.</span>
       <span class="spacer"></span>
       <span class="switch"><input type="checkbox" id="schedOn" onchange="api('/global','POST',{scheduler_on:this.checked}).then(()=>toast(this.checked?'Авторассылки включены':'Авторассылки выключены'))"><span class="slider"></span></span></div></div>
+    <div class="card" style="padding-bottom:10px"><div class="row" style="margin:0">
+      <b style="font-size:15px">👥 Чьи настройки правим</b>
+      <span class="mut" style="font-size:12px">— «Общие» задают базу для всех групп; выбери группу, чтобы задать ей своё расписание.</span></div>
+      <div class="subtabs" id="passSrcTabs" style="margin-top:10px"></div>
+      <div id="passSrcBox"></div>
+    </div>
     <div class="subtabs" id="passSubtabs"></div>
     <div id="passCards"></div>
   </div>

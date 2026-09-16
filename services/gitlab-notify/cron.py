@@ -122,20 +122,26 @@ def main(argv: list[str]) -> None:
             gid = src.get("group_id")
             if not gid:
                 continue
+            # Per-group opt-out («только вебхуки») applies to the host-cron path
+            # too — otherwise the fallback would resurrect sends the group muted.
+            if not settings.source_scheduler_on(src["id"]):
+                log.info("cron %s: scheduled sends disabled for this group — skip", src["id"])
+                continue
             gl = GitLabClient(url, src.get("token", ""))
             for name in wanted:
                 schedkey = keys.ns(src["id"], name)
+                cfg = settings.pass_schedule(name, src["id"])   # group override over global
                 # INTERVAL passes (the delta digests, Phase 3a) are SCHEDULER-ONLY:
                 # they need an every-2h evaluation loop with eval-throttle + last-
                 # send cadence that host-cron (one-shot) can't provide. Skip them
                 # here so a daily host-cron run never fires a delta out of band.
-                if settings.pass_schedule(name).get("kind") == "interval":
+                if cfg.get("kind") == "interval":
                     log.info("cron %s/%s: interval pass is scheduler-only — skip", src["id"], name)
                     continue
                 if store.already_sent(keys.SCHED, schedkey, day=today_iso):
                     log.info("cron %s/%s: already fired today — skip", src["id"], name)
                     continue
-                anchor = today.weekday() in settings.pass_schedule(name).get("anchor_days", [])
+                anchor = today.weekday() in cfg.get("anchor_days", [])
                 run_one(ctx.engine, gl, gid, store, name,
                         anchor=anchor, room=src.get("room"), skey=src["id"])
                 store.mark_sent(keys.SCHED, schedkey, day=today_iso)

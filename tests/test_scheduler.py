@@ -239,7 +239,7 @@ def _interval_ctx(store, engine, gl, *, only=("digest_delta",), now=None,
     alerts = SimpleNamespace(alert_pass_failure=lambda *a, **k: None)
     glob = {"scheduler_on": True, "delta_quiet_after_full_h": quiet_h}
 
-    def _pass_schedule(name):
+    def _pass_schedule(name, source_id=None):
         # The interval delta schedule (kind=interval) with small floor for tests.
         return {"enabled": True, "kind": "interval", "days": [0, 1, 2, 3, 4],
                 "every_hours": 2.5, "floor_min": 20, "change_threshold": 5,
@@ -252,6 +252,7 @@ def _interval_ctx(store, engine, gl, *, only=("digest_delta",), now=None,
         is_active_now=lambda n: True,
         conn_value=lambda field: "",
         pass_schedule=_pass_schedule,
+        source_scheduler_on=lambda sid: True,
     )
     sources = SimpleNamespace(enabled=lambda: [{"id": "s1", "group_id": "g1", "room": "!r"}])
     return SimpleNamespace(settings=settings, store=store, sources=sources,
@@ -379,14 +380,15 @@ def test_full_send_stamps_last_full_marker(tmp_path, monkeypatch):
     engine, gl = _Engine(), _GitLab([_issue(1, "misha", due="2026-06-10")])
     alerts = SimpleNamespace(alert_pass_failure=lambda *a, **k: None)
 
-    def _pass_schedule(name):
+    def _pass_schedule(name, source_id=None):
         # digest_full is a daily/calendar pass due now (Mon in days, 09:00).
         return {"enabled": True, "kind": "daily", "days": [0, 1, 2, 3, 4], "time": "09:00"}
 
     settings = SimpleNamespace(
         enabled=lambda: True, get_global=lambda: {"scheduler_on": True},
         is_nonworking=lambda iso: False, is_active_now=lambda n: True,
-        conn_value=lambda f: "", pass_schedule=_pass_schedule)
+        conn_value=lambda f: "", pass_schedule=_pass_schedule,
+        source_scheduler_on=lambda sid: True)
     sources = SimpleNamespace(enabled=lambda: [{"id": "s1", "group_id": "g1", "room": "!r"}])
     ctx = SimpleNamespace(settings=settings, store=store, sources=sources,
                           engine=engine, alerter=alerts)
@@ -395,3 +397,54 @@ def test_full_send_stamps_last_full_marker(tmp_path, monkeypatch):
     assert len(engine.handled) == 1                       # full overview sent
     marker = store.get_state("last_full", keys.ns("s1", keys.DIGEST_PERSONAL))
     assert marker is not None and "ts" in marker          # marker stamped for the delta
+
+
+# === per-group schedules: a source can pin its own or opt out entirely =======
+# The scheduler reads `pass_schedule(name, source_id)` and the per-group master
+# switch, so one room can keep the full digest programme while another gets only
+# realtime webhooks. These drive the REAL Settings (not a fake) through tick().
+def _multi_ctx(store, engine, rooms=(("s1", "!r1"), ("s2", "!r2"))):
+    from settings import Settings
+    alerts = SimpleNamespace(alert_pass_failure=lambda *a, **k: None)
+    sources = SimpleNamespace(enabled=lambda: [
+        {"id": sid, "group_id": f"g:{sid}", "room": room} for sid, room in rooms])
+    return SimpleNamespace(settings=Settings(store), store=store, sources=sources,
+                           engine=engine, alerter=alerts)
+
+
+def _rooms_hit(tmp_path, monkeypatch, tweak):
+    """Run one due digest_full tick over two sources; return the rooms it reached."""
+    store = Store(path=str(tmp_path / "s.db"))
+    engine, gl = _Engine(), _GitLab([_issue(1, "misha", due="2026-06-10")])
+    ctx = _multi_ctx(store, engine)
+    ctx.settings.update_pass("digest_full",
+                             {"enabled": True, "days": [0, 1, 2, 3, 4], "time": "09:00"})
+    tweak(ctx.settings)
+    _patch(monkeypatch, now=dt.datetime(2026, 6, 1, 9, 30), only=("digest_full",), gl=gl)
+    scheduler.tick(ctx)
+    return {e.room for e in engine.handled}
+
+
+def test_per_group_default_is_every_group(tmp_path, monkeypatch):
+    # No per-group rows -> the global schedule reaches both rooms (old behaviour).
+    assert _rooms_hit(tmp_path, monkeypatch, lambda s: None) == {"!r1", "!r2"}
+
+
+def test_source_scheduler_off_silences_only_that_group(tmp_path, monkeypatch):
+    # s2 = «webhooks only»: no scheduled send for it, s1 unaffected.
+    assert _rooms_hit(tmp_path, monkeypatch,
+                      lambda s: s.set_source_scheduler("s2", False)) == {"!r1"}
+
+
+def test_source_pass_override_disables_one_pass_for_one_group(tmp_path, monkeypatch):
+    # A single pass pinned off for s2 — the rest of its programme would still run.
+    assert _rooms_hit(tmp_path, monkeypatch,
+                      lambda s: s.update_source_pass("s2", "digest_full",
+                                                     {"enabled": False})) == {"!r1"}
+
+
+def test_source_pass_override_can_move_the_time_for_one_group(tmp_path, monkeypatch):
+    # s2 pins 18:00 — at 09:30 only s1 is due.
+    assert _rooms_hit(tmp_path, monkeypatch,
+                      lambda s: s.update_source_pass("s2", "digest_full",
+                                                     {"time": "18:00"})) == {"!r1"}

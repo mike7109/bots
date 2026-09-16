@@ -238,7 +238,7 @@ class _RecordingEngine:
     def render(self, template, channel, ctx):    # renderer.render
         return f"<html {template}>"
 
-    def pass_schedule(self, name):               # settings.pass_schedule (stale)
+    def pass_schedule(self, name, source_id=None):               # settings.pass_schedule (stale)
         return {}
 
 

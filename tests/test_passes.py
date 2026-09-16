@@ -108,7 +108,7 @@ def test_has_anchor_is_empty_after_split():
 # --- (c) every scheduled pass's run adapter is callable -------------------
 class _Settings:
     """Minimal settings stub: stale's adapter reads days_idle off engine.settings."""
-    def pass_schedule(self, name):
+    def pass_schedule(self, name, source_id=None):
         return {"days_idle": 14}
 
 

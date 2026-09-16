@@ -32,6 +32,9 @@ const DEST={room:'Комната',dm:'Личка'};
 const CAT_ORDER=['group','personal','webhook'];
 const CAT_LABEL={group:'Групповые (в комнату)',personal:'Личные (в ЛС)',webhook:'Вебхуки'};
 let PASSCAT='all';
+// Whose schedule the «Рассылки» tab is editing: '' = the GLOBAL rows (the base
+// every group inherits), or a source id = that group's own overrides.
+let PASSSRC='';
 const PUSHL={default:'Как задумано',loud:'Всегда пуш',quiet:'Тихо (без пуша)'};
 function kindTitle(k){return (KIND[k]||{}).t||k;}
 function kindDesc(k){return (KIND[k]||{}).d||'';}
@@ -275,9 +278,15 @@ function srcCard(s){
     <div class="row" style="margin:10px 0 0">
       <button class="sm" onclick="validateSrc(this)">🔌 Проверить доступ</button>
       <button class="primary sm" onclick="saveSrc(this)">Сохранить</button>
+      ${isNew?'':`<button class="sm" onclick="openSrcPasses('${esc(s.id)}')" title="Расписание рассылок именно для этой группы">⏱ Рассылки этой группы</button>`}
       ${isNew?'':`<button class="sm" onclick="deleteSrc('${esc(s.id)}',this)">Удалить</button>`}
       <span class="spacer"></span><span class="srcRes" style="font-size:13px"></span></div>
     ${s.full_path?`<div class="mut" style="font-size:12px;margin-top:8px">GitLab: <b>${esc(s.group_name||'')}</b> · <span class="mono">${esc(s.full_path)}</span> · вебхуки проектов этой группы → сюда</div>`:'<div class="mut" style="font-size:12px;margin-top:8px">Полный путь группы заполнится после «Проверить доступ»/«Сохранить» — без него вебхук-роутинг не сработает.</div>'}
+    ${isNew?'':`<div class="mut" style="font-size:12px;margin-top:4px">Рассылки по расписанию: ${
+      !srcSchedOn(s.id)?'<b>выключены</b> — в эту комнату идут только события issue'
+      :(Object.keys((S.source_passes||{})[s.id]||{}).length
+        ? `<b>своё расписание</b> (${Object.keys((S.source_passes||{})[s.id]||{}).length})`
+        : 'как общие')}</div>`}
   </div>`;
 }
 function renderSources(){
@@ -324,6 +333,47 @@ function miniDays(sel,prefix){return DAYS.map((d,i)=>`<span class="day ${sel.inc
 // Category of a pass (registry-driven), with a safe default for the rare case a
 // pass has no registry entry.
 function passCat(p){return (REG[p]||{}).trigger==='webhook'?'webhook':((REG[p]||{}).category||'group');}
+// --- per-group schedule layer -------------------------------------------
+// The backend keeps the global rows plus, per group, only the fields that group
+// pinned. Here: `passOverride` = what THIS group changed, `passCfg` = what it
+// actually runs on (global merged under the override).
+function srcName(sid){const s=(S.sources||[]).find(x=>x.id===sid);return s?(s.name||s.id):sid;}
+function passOverride(p){return PASSSRC?(((S.source_passes||{})[PASSSRC]||{})[p]||{}):{};}
+function passCfg(p){const g=S.pass_schedules[p]||{};return PASSSRC?{...g,...passOverride(p)}:g;}
+function srcSchedOn(sid){return (S.source_scheduler||{})[sid]!==false;}
+function selectPassSrc(id){PASSSRC=id||'';renderPasses();}
+// Jump here from the «Группы» tab: open Рассылки already filtered to that group.
+function openSrcPasses(id){switchTab('sched');selectPassSrc(id);}
+async function setSrcScheduler(on){
+  await api('/source/'+encodeURIComponent(PASSSRC)+'/scheduler','POST',{enabled:on});
+  toast(on?'Рассылки по расписанию включены для группы':'Группа переведена на «только вебхуки»');load();}
+async function resetSrcPass(p,btn){
+  await api('/source/'+encodeURIComponent(PASSSRC)+'/pass/'+p,'POST',{reset:true});
+  toast('«'+p+'»: снова как общее');load();}
+// Header row: «Общие» + one chip per group, each showing how far it diverges.
+function renderPassSrcTabs(){
+  const box=$('passSrcTabs');if(!box)return;
+  if(PASSSRC&&!(S.sources||[]).some(s=>s.id===PASSSRC))PASSSRC='';   // group deleted
+  const pill=(id,label,extra)=>`<span class="subtab ${PASSSRC===id?'sel':''}" onclick="selectPassSrc('${esc(id)}')">${esc(label)}${extra||''}</span>`;
+  box.innerHTML=pill('','⚙ Общие (все группы)')
+    +(S.sources||[]).map(s=>{
+      const n=Object.keys((S.source_passes||{})[s.id]||{}).length;
+      const badge=!srcSchedOn(s.id)?'<span class="cnt">только вебхуки</span>'
+        :(n?`<span class="cnt" title="своих расписаний: ${n}">${n}</span>`:'');
+      return pill(s.id,s.name||s.id,badge);}).join('');
+  const bx=$('passSrcBox');if(!bx)return;
+  if(!PASSSRC){
+    bx.innerHTML='<p class="hint" style="margin:10px 0 0">Правишь базу: её наследует каждая группа, у которой нет своего расписания.</p>';
+    return;}
+  const on=srcSchedOn(PASSSRC);
+  bx.innerHTML=`<div class="row" style="margin:10px 0 0"><b>⏱ Рассылки по расписанию для «${esc(srcName(PASSSRC))}»</b>
+      <span class="mut" style="font-size:12px">— выключи, если этой группе нужны только события issue (вебхуки).</span>
+      <span class="spacer"></span>
+      <span class="switch"><input type="checkbox" ${on?'checked':''} onchange="setSrcScheduler(this.checked)"><span class="slider"></span></span></div>
+    <p class="hint" style="margin:6px 0 0">${on
+      ? 'Карточки ниже — расписание этой группы. Бейдж «своё» значит, что оно отличается от общего; «↺ как общее» вернёт наследование.'
+      : '<b>Сейчас группа получает только вебхуки</b> — ни одна рассылка по расписанию в её комнату не уходит, что бы ни стояло в карточках ниже.'}</p>`;
+}
 // The unified «Рассылки» list is ONE registry-driven list: the scheduled passes
 // (S.passes) PLUS every event-driven registry entry — webhook (e.g. `issue`) or
 // poll (`subtask`). The card adapts (event-driven cards have no schedule/run).
@@ -336,9 +386,13 @@ function allCards(){
 // Sub-tabs are built from the categories actually present across the unified list:
 // «Все» first, then CAT_ORDER, then any extra categories appended in first-seen
 // order. Counts span scheduled + webhook cards alike.
+// Cards visible in the CURRENT view: a group's view hides webhook/poll cards —
+// those fire per event, not per schedule, and are configured globally.
+function visibleCards(){return allCards().filter(p=>!(PASSSRC&&isEventDriven(p)));}
 function renderPassSubtabs(){
   const box=$('passSubtabs');if(!box)return;
-  const cards=allCards();
+  if(PASSSRC&&PASSCAT==='webhook')PASSCAT='all';     // that sub-tab is empty here
+  const cards=visibleCards();
   const cnt={};cards.forEach(p=>{const c=passCat(p);cnt[c]=(cnt[c]||0)+1;});
   const present=Object.keys(cnt);
   const ordered=CAT_ORDER.filter(c=>present.includes(c))
@@ -381,11 +435,13 @@ function passSummary(p,c,wh){
   return `${dayRange(c.days)} · ${esc(c.time||'09:00')}`;
 }
 function renderPasses(){
+  renderPassSrcTabs();
   renderPassSubtabs();
-  const passes=allCards().filter(p=>PASSCAT==='all'||passCat(p)===PASSCAT);
+  const passes=visibleCards().filter(p=>PASSCAT==='all'||passCat(p)===PASSCAT);
   if(!passes.length){$('passCards').innerHTML='<p class="hint" style="margin:8px 0">Здесь пока пусто.</p>';return;}
-  $('passCards').innerHTML=passes.map(p=>{
-    const c=S.pass_schedules[p]||{};
+  const srcHint=PASSSRC?`<p class="hint" style="margin:8px 0 14px">Показаны только рассылки по расписанию — их можно задать для «${esc(srcName(PASSSRC))}» отдельно. Вебхуки (issue, комментарии) и адрес «Куда» общие для всех групп: вкладка «⚙ Общие».</p>`:'';
+  $('passCards').innerHTML=srcHint+passes.map(p=>{
+    const c=passCfg(p);
     // Meta comes from the backend registry; `tpl` is the pass's event template
     // (the «✎ шаблон» / «👁 Пример» target) — digest_full & digest_delta share it.
     const meta=REG[p]||{};
@@ -410,10 +466,23 @@ function renderPasses(){
     // для расписания — тип включён И расписание включено; для вебхука — тип включён.
     const r=(S.rules||[]).find(x=>x.event===ek);
     const ruleOn=r?r.enabled:true, schedOn=c.enabled!==false;
-    const active=wh?(r?r.enabled:false):(schedOn&&ruleOn);
+    // В режиме группы карточка описывает ТОЛЬКО её расписание: тип уведомления
+    // (правило) и адрес остаются общими, поэтому «уходит» = расписание группы
+    // включено, тип включён глобально и у группы не отключены рассылки целиком.
+    const srcOn=!PASSSRC||srcSchedOn(PASSSRC);
+    const active=wh?(r?r.enabled:false):(schedOn&&ruleOn&&srcOn);
     const headToggle=wh
       ? (r?`<label class="switch" title="Включить/выключить это уведомление"><input type="checkbox" ${active?'checked':''} onchange="setRule('${ek}',{enabled:this.checked})"><span class="slider"></span></label>`:'')
+      : PASSSRC
+      ? `<label class="switch" title="Включить/выключить эту рассылку для группы «${esc(srcName(PASSSRC))}»"><input type="checkbox" ${schedOn?'checked':''} onchange="toggleSrcNotif('${p}',this)"><span class="slider"></span></label>`
       : `<label class="switch" title="Включить/выключить это уведомление (тип + расписание)"><input type="checkbox" ${active?'checked':''} onchange="toggleNotif('${p}','${ek}',this)"><span class="slider"></span></label>`;
+    // Наследование: «своё» = группа пришпилила свои поля, «как общее» = следует базе.
+    const ovKeys=Object.keys(passOverride(p));
+    const srcBadge=!PASSSRC?''
+      : ovKeys.length?'<span class="badge sent" title="Своё расписание этой группы — отличается от общего">своё</span>'
+      : '<span class="tag" title="Наследуется из «⚙ Общие»">как общее</span>';
+    const offBadge=(PASSSRC&&!srcOn)?' <span class="badge ignored" title="У группы выключены все рассылки по расписанию">только вебхуки</span>':'';
+    const typeOffBadge=(PASSSRC&&!ruleOn)?' <span class="badge ignored" title="Тип уведомления выключен глобально — во вкладке «⚙ Общие»">тип выключен</span>':'';
     // Webhook cards (e.g. issue) have NO schedule editor and NO «Запустить сейчас»
     // (there's nothing to schedule/trigger — they fire on the GitLab event); they
     // still expose «Пример»/«шаблон» + the type-enable + destination editor.
@@ -430,14 +499,16 @@ function renderPasses(){
       <div class="passhead">
         <div class="passicon">${icon}</div>
         <div class="passtitle"><b>${esc(title)}</b><div class="passsub">${subtitle}</div></div>
-        <div class="passmeta">${trigBadge} ${destBadge}${!active?' <span class="badge ignored" title="Выключено — ничего не уходит">выключено</span>':''}</div>
+        <div class="passmeta">${trigBadge} ${destBadge} ${srcBadge}${!active?' <span class="badge ignored" title="Выключено — ничего не уходит">выключено</span>':''}${offBadge}${typeOffBadge}</div>
         ${headToggle}
       </div>
       <div class="passsum"><span class="sumlabel">${wh?'Триггер':'Когда'}:</span> ${passSummary(p,c,wh)}</div>
-      <details class="pBody"><summary>⚙ Настроить ${wh?'тип и адрес':'расписание и адрес'}</summary>
+      <details class="pBody"><summary>⚙ Настроить ${PASSSRC?'расписание группы':(wh?'тип и адрес':'расписание и адрес')}</summary>
         <div class="pBodyInner">
           ${wh?'':passSchedEditor(p,c)}
-          ${ruleBlock(ek,shared)}
+          ${PASSSRC
+            ? `<p class="hint" style="margin:8px 0 0">Тип уведомления и адрес «Куда» — общие для всех групп, меняются во вкладке «⚙ Общие».${ovKeys.length?` Своё здесь: ${ovKeys.map(esc).join(', ')}.`:''}</p>`
+            : ruleBlock(ek,shared)}
         </div>
       </details>
       <div class="bubble pEx hide" style="margin:10px 0"></div>
@@ -445,6 +516,7 @@ function renderPasses(){
       <div class="passactions">
         <button class="sm" onclick="passExample('${esc(tpl)}',this)">👁 Пример</button>
         <button class="sm" onclick="editTpl('${esc(tpl)}')">✎ шаблон</button>
+        ${PASSSRC&&ovKeys.length?`<button class="sm" onclick="resetSrcPass('${p}',this)" title="Убрать своё расписание — следовать общему">↺ как общее</button>`:''}
         ${runBtns}
       </div>
       <div class="pResult" style="margin-top:8px;font-size:13px"></div></div>`;
@@ -488,7 +560,7 @@ function passSchedEditor(p,c){
 }
 async function savePass(p,btn){
   const card=btn.closest('.card');
-  const kind=(S.pass_schedules[p]||{}).kind;
+  const kind=passCfg(p).kind;
   const days=[...card.querySelectorAll('.pDays .day.sel')].map(e=>+e.dataset.d);
   let body;
   // Только поля расписания — вкл/выкл уведомления делает единый тумблер в шапке
@@ -500,7 +572,18 @@ async function savePass(p,btn){
     body={days,time:readTimePicker(card,'pTime')};
     const idle=card.querySelector('.pIdle');if(idle)body.days_idle=+idle.value;
   }
+  if(PASSSRC){
+    await api('/source/'+encodeURIComponent(PASSSRC)+'/pass/'+p,'POST',body);
+    toast('Расписание «'+p+'» для «'+srcName(PASSSRC)+'» сохранено');load();return;
+  }
   await api('/pass/'+p,'POST',body);toast('Расписание «'+p+'» сохранено');
+}
+// Тумблер карточки в режиме группы: трогает ТОЛЬКО расписание этой группы
+// (глобальный тип уведомления остаётся как есть — он общий).
+async function toggleSrcNotif(p,el){
+  const on=el.checked;
+  await api('/source/'+encodeURIComponent(PASSSRC)+'/pass/'+p,'POST',{enabled:on});
+  toast(on?'Включено для «'+srcName(PASSSRC)+'»':'Выключено для «'+srcName(PASSSRC)+'»');load();
 }
 // Единый выключатель уведомления: ставит И тип (правило), И расписание в одно
 // состояние. Merge-патчи не трогают дни/время/адрес — только enabled.
@@ -630,7 +713,9 @@ const REASON_INFO={
 // Причины, при которых ничего не уйдёт (и слать не нужно).
 function isNoSend(reason){return reason==='no_changes'||reason==='no_baseline'||reason==='empty';}
 // mode → JSON-параметры запроса (пустой mode = single-mode pass, не передаём).
-function modeBody(mode,dry){const b={dry:!!dry};if(mode)b.mode=mode;return b;}
+// Ручной запуск/предпросмотр идёт по тем же группам, что и вид: в режиме группы
+// — только по ней, в «Общих» — по всем включённым источникам, как раньше.
+function modeBody(mode,dry){const b={dry:!!dry};if(mode)b.mode=mode;if(PASSSRC)b.source=PASSSRC;return b;}
 // Рендер одной строки источника (предпросмотр / результат) с пузырём сообщения.
 function perRow(r){
   if(r.reason==='error')

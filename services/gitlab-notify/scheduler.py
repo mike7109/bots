@@ -256,9 +256,14 @@ def tick(ctx) -> None:
         gid = src.get("group_id")
         if not gid:
             continue
+        # Per-group master switch: a group can opt out of scheduled sends entirely
+        # and keep only realtime webhooks (which never reach the scheduler).
+        if not s.source_scheduler_on(src["id"]):
+            continue
         gl = GitLabClient(gitlab_url, src.get("token", ""))
         for name in cron.PASSES:
-            cfg = s.pass_schedule(name)
+            # Schedule for THIS group: global row, then the group's own override.
+            cfg = s.pass_schedule(name, src["id"])
             if not cfg.get("enabled"):
                 continue
             # Branch on the pass's schedule kind: the two delta digests run on an
