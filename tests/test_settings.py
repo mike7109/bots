@@ -554,3 +554,35 @@ def test_clear_source_settings_forgets_the_group(settings):
     settings.clear_source_settings("g56")
     assert settings.source_pass_overrides("g56") == {}
     assert settings.source_scheduler_on("g56") is True
+
+
+# --- watched rules: wildcard tag + per-group scope ---------------------
+# `*` in tags = «любая задача», so a room can mirror a whole group without
+# label discipline. Scoping a rule to sources keeps that wildcard from dragging
+# every other group's issues along.
+def test_watched_wildcard_matches_unlabelled_issue(settings):
+    settings.set_watched([{"name": "Медицина", "tags": ["*"], "rooms": ["!med:s"],
+                           "sources": ["g56"]}])
+    assert [r["rooms"] for r in settings.watched_targets([], "g56")] == [["!med:s"]]
+    assert [r["rooms"] for r in settings.watched_targets(["bug"], "g56")] == [["!med:s"]]
+
+
+def test_watched_scope_limits_rule_to_its_sources(settings):
+    settings.set_watched([{"name": "Медицина", "tags": ["*"], "rooms": ["!med:s"],
+                           "sources": ["g56"]}])
+    assert settings.watched_targets(["bug"], "default") == []   # другая группа
+    assert settings.watched_targets(["bug"], None) == []        # проект без источника
+
+
+def test_watched_without_scope_still_matches_any_source(settings):
+    # Старое поведение сохраняется: правило без выбранных групп ловит всех.
+    settings.set_watched([{"name": "Флаги", "tags": ["type::bug"], "rooms": ["!f:s"]}])
+    assert settings.watched_targets(["type::bug"], "g56")[0]["name"] == "Флаги"
+    assert settings.watched_targets(["type::bug"], None)[0]["name"] == "Флаги"
+    assert settings.get_watched()[0]["sources"] == []
+
+
+def test_watched_wildcard_respects_enabled_and_rooms(settings):
+    settings.set_watched([{"name": "off", "tags": ["*"], "rooms": ["!x:s"], "enabled": False},
+                          {"name": "roomless", "tags": ["*"], "rooms": []}])
+    assert settings.watched_targets(["anything"], "g56") == []

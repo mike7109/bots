@@ -665,11 +665,20 @@ function watchCard(w){
     </div>
     <div class="row" style="margin:10px 0 0;align-items:flex-start;gap:16px">
       <div style="flex:1">
-        <div class="mut" style="margin-bottom:4px">Теги — по одному в строке (issue с любым из них считается особой):</div>
-        <textarea class="wTags" placeholder="security&#10;incident" style="min-height:84px">${esc((w.tags||[]).join('\n'))}</textarea></div>
+        <div class="mut" style="margin-bottom:4px">Теги — по одному в строке (issue с любым из них считается особой).
+          Строка <b class="mono">*</b> — <b>любая задача</b>, даже без меток:</div>
+        <textarea class="wTags" placeholder="security&#10;incident&#10;*" style="min-height:84px">${esc((w.tags||[]).join('\n'))}</textarea></div>
       <div style="flex:1">
         <div class="mut" style="margin-bottom:4px">Комнаты Matrix — по одной в строке (куда слать):</div>
         <textarea class="wRooms" placeholder="!abcdef:fakspro.ru" style="min-height:84px">${esc((w.rooms||[]).join('\n'))}</textarea></div>
+    </div>
+    <div style="margin:10px 0 0">
+      <div class="mut" style="margin-bottom:4px">Из каких групп брать задачи (ничего не выбрано — из любой):</div>
+      <div class="days wSrcs">${(S.sources||[]).map(x=>
+        `<span class="day ${(w.sources||[]).includes(x.id)?'sel':''}" data-sid="${esc(x.id)}" onclick="this.classList.toggle('sel')">${esc(x.name||x.id)}</span>`).join('')}</div>
+      ${(w.tags||[]).includes('*')&&!(w.sources||[]).length
+        ? '<p class="hint" style="margin:6px 0 0;color:var(--bad)">⚠️ Правило с <b class="mono">*</b> и без выбранной группы заберёт <b>все</b> issue <b>всех</b> групп в эти комнаты. Выбери группу.</p>'
+        : '<p class="hint" style="margin:6px 0 0">Ограничение по группе особенно важно для <b class="mono">*</b>: иначе правило заберёт задачи всех групп.</p>'}
     </div>
     <div class="row" style="margin:10px 0 0">
       <button class="primary sm" onclick="saveWatched()">Сохранить</button>
@@ -684,8 +693,10 @@ function renderWatched(){
 function gatherWatched(){
   return [...document.querySelectorAll('.watchcard')].map(c=>{
     const lines=sel=>(c.querySelector(sel).value||'').split('\n').map(s=>s.trim()).filter(Boolean);
+    const srcs=[...c.querySelectorAll('.wSrcs .day.sel')].map(e=>e.dataset.sid);
     return {id:c.dataset.wid||'', name:c.querySelector('.wName').value.trim(),
-      tags:lines('.wTags'), rooms:lines('.wRooms'), enabled:c.querySelector('.wEn').checked};
+      tags:lines('.wTags'), rooms:lines('.wRooms'), sources:srcs,
+      enabled:c.querySelector('.wEn').checked};
   }).filter(w=>w.name||w.tags.length||w.rooms.length);   // отбрасываем нетронутую пустую карточку
 }
 async function saveWatched(){

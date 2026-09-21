@@ -29,6 +29,7 @@ from settings import Settings                    # noqa: E402
 SECRET = "wh-secret"
 PROJECT = "fakspro/infra"
 DEFAULT_ROOM = "!default:srv"
+SOURCE_ID = "s1"
 
 
 class FakeEngine:
@@ -65,11 +66,12 @@ class FakeStore:
 
 
 class FakeSources:
-    def __init__(self, room=DEFAULT_ROOM):
+    def __init__(self, room=DEFAULT_ROOM, sid=SOURCE_ID):
         self._room = room
+        self._sid = sid
 
     def match_path(self, project):
-        return {"room": self._room} if self._room else None
+        return {"id": self._sid, "room": self._room} if self._room else None
 
 
 class FakeMatrix:
@@ -462,3 +464,31 @@ def test_note_without_iid_posts_top_level(settings, monkeypatch):
          "comment": "готово @m.bahmutskij", "thread_root": None},
     ]
     assert ctx.store.d == {}                                # no thread key persisted
+
+
+# --- wildcard rule: «*» = любая задача, но только выбранной группы -----------
+def test_wildcard_rule_threads_every_issue_of_its_source(settings, monkeypatch):
+    # Комната наблюдения = комната источника (как у «Медицины»): плоского
+    # сообщения нет, задача сразу разворачивается в тред — даже без единой метки.
+    settings.set_watched([{"name": "Медицина", "tags": ["*"], "rooms": [DEFAULT_ROOM],
+                           "sources": [SOURCE_ID]}])
+    ctx = _ctx(settings)
+    monkeypatch.setattr(app_module, "ctx", ctx)
+    _call(ctx, _payload("open", labels=()))
+    assert ctx.engine.calls == [
+        {"kind": "issue_root", "room": DEFAULT_ROOM, "action": "open", "watched": True},
+        {"kind": "issue_card", "room": DEFAULT_ROOM, "action": "open", "watched": True,
+         "thread_root": "$evt1"},
+    ]
+
+
+def test_wildcard_rule_ignores_other_sources(settings, monkeypatch):
+    # Та же «звёздочка», но событие пришло из другой группы — правило молчит,
+    # issue уходит обычным плоским сообщением в комнату своего источника.
+    settings.set_watched([{"name": "Медицина", "tags": ["*"], "rooms": ["!med:srv"],
+                           "sources": ["g56"]}])
+    ctx = _ctx(settings)
+    monkeypatch.setattr(app_module, "ctx", ctx)
+    _call(ctx, _payload("open", labels=("security",)))
+    assert ctx.engine.calls == [
+        {"kind": "issue", "room": DEFAULT_ROOM, "action": "open", "watched": False}]

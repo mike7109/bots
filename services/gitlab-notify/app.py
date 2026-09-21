@@ -204,8 +204,11 @@ async def webhook(request: Request, x_gitlab_token: str = Header(default="")):
     # match, so a "special" issue reaches its group even from an unconfigured
     # project. Detection uses event.labels (unfiltered); the display whitelist
     # only trims chips at render time, so it can't hide a watched tag here.
+    # The source match is needed twice: to scope watch rules to a group and, below,
+    # to pick the room a plain issue event goes to.
+    src = ctx.sources.match_path(event.project)
     watch_rooms = []
-    for r in ctx.settings.watched_targets(event.labels):
+    for r in ctx.settings.watched_targets(event.labels, (src or {}).get("id")):
         for rm in r["rooms"]:
             if rm not in watch_rooms:
                 watch_rooms.append(rm)
@@ -214,7 +217,6 @@ async def webhook(request: Request, x_gitlab_token: str = Header(default="")):
     # `note` (new comments) are too noisy / watch-scoped for the normal channel, so
     # they go ONLY to watch rooms; open/close/reopen also post to the source room
     # (as before).
-    src = ctx.sources.match_path(event.project)
     default_room = src.get("room") if src else None
     watch_only = event.kind == "note" or event.action == "update"
     # A room that is BOTH the source room AND a watch room must get the THREADED

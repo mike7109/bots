@@ -592,6 +592,10 @@ class Settings:
                 "name": str(r.get("name") or ""),
                 "tags": [str(t) for t in (r.get("tags") or []) if str(t).strip()],
                 "rooms": [str(rm).strip() for rm in (r.get("rooms") or []) if str(rm).strip()],
+                # Scope: source ids this rule applies to ([] = any group). Matters
+                # most for a WILDCARD rule — without a scope `*` would pull every
+                # issue of every group into this rule's rooms.
+                "sources": [str(x).strip() for x in (r.get("sources") or []) if str(x).strip()],
                 "enabled": bool(r.get("enabled", True)),
             })
         return out
@@ -614,22 +618,43 @@ class Settings:
                 s = str(rm).strip()
                 if s and s not in rooms:
                     rooms.append(s)
+            sources = []
+            for x in (r.get("sources") or []):
+                s = str(x).strip()
+                if s and s not in sources:
+                    sources.append(s)
             clean.append({
                 "id": rid,
                 "name": str(r.get("name") or "").strip(),
                 "tags": tags,
                 "rooms": rooms,
+                "sources": sources,
                 "enabled": bool(r.get("enabled", True)),
             })
         self.store.set_state(_KIND, "watched", {"rules": clean})
         return self.get_watched()
 
-    def watched_targets(self, labels) -> list:
-        """Enabled watched rules whose tags intersect this issue's labels (and
-        that have at least one destination room). Each result carries its rooms."""
+    WATCH_ANY_TAG = "*"      # tag that means "every issue", not a label named "*"
+
+    def watched_targets(self, labels, source_id: str | None = None) -> list:
+        """Enabled watched rules that claim THIS issue (and have somewhere to send).
+
+        A rule matches when its tags intersect the issue's labels, or when it
+        carries the wildcard tag `*` — "every issue, labelled or not". A rule may
+        also be scoped to specific sources (`sources`); an unscoped rule keeps the
+        old behaviour and fires for any project, including ones with no source.
+        Scoping matters for wildcards: `*` without a scope would drag every issue
+        of every group into that rule's rooms."""
         have = set(labels or [])
-        return [r for r in self.get_watched()
-                if r["enabled"] and r["tags"] and r["rooms"] and have.intersection(r["tags"])]
+        out = []
+        for r in self.get_watched():
+            if not (r["enabled"] and r["tags"] and r["rooms"]):
+                continue
+            if r["sources"] and source_id not in r["sources"]:
+                continue
+            if self.WATCH_ANY_TAG in r["tags"] or have.intersection(r["tags"]):
+                out.append(r)
+        return out
 
 
 def weekday_names(days) -> str:
